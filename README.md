@@ -104,7 +104,6 @@ tidy && exec java -Xms128M -XX:MaxRAMPercentage=95.0 -Dterminal.jline=false -Dte
 
 ## Building from Source
 
-
 ```bash
 # Run all tests
 make test
@@ -112,3 +111,9 @@ make test
 # Build static binary
 make build
 ```
+
+---
+
+> [!WARNING]
+> **Notice**: This is a **vibe coded** project and is only meant to be used for convenience. Use at your own discretion.
+
