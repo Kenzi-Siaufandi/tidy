@@ -1,0 +1,18 @@
+# Binaries
+tidy
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Server & Plugin artifacts
+*.jar
+*.tidy-tmp
+plugins/
+logs/
+world/
+cache/
+.tidy/
+
+# Test directories
+test-workspace/

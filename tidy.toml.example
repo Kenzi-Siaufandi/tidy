@@ -1,0 +1,14 @@
+[server]
+# Enforces fill v4 API resolution; direct 'url' is not supported here
+project = "paper"
+version = "26.2"
+
+[plugins.FastAsyncWorldEdit]
+source = "modrinth"
+project_id = "fastasyncworldedit"
+version = "2.11.2"
+
+[plugins.Vault]
+source = "url"
+url = "https://github.com/MilkBowl/Vault/releases/download/1.7.3/Vault.jar"
+sha256 = "a6b5ed97f43a5cf5bbaf00a7c8cd23c5afc9bd003f849875af8b36e6cf77d01d"
