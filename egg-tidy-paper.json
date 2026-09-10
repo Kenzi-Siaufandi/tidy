@@ -4,7 +4,7 @@
     "version": "PTDL_v2",
     "update_url": null
   },
-  "exported_at": "2026-09-10T21:58:00+07:00",
+  "exported_at": "2026-09-10T22:55:00+07:00",
   "name": "Paper (Tidy - Java 25)",
   "author": "Kenzi-Siaufandi",
   "description": "High-performance Paper Minecraft server running on Java 25, orchestrated by Tidy for declarative Git configuration synchronization, PaperMC Fill API software resolution, Modrinth and direct HTTPS plugin & world downloads with universal SHA-256 verification, and automatic credential injection.",
@@ -12,11 +12,11 @@
     "eula"
   ],
   "docker_images": {
-    "Java 25 (ghcr.io/pterodactyl/yolks:java_25)": "ghcr.io/pterodactyl/yolks:java_25",
-    "Java 25 (eclipse-temurin:25-jre-alpine)": "eclipse-temurin:25-jre-alpine"
+    "Java 25 (Tidy Pre-Baked: ghcr.io/kenzi-siaufandi/tidy:java25)": "ghcr.io/kenzi-siaufandi/tidy:java25",
+    "Java 25 (Official Yolks: ghcr.io/pterodactyl/yolks:java_25)": "ghcr.io/pterodactyl/yolks:java_25"
   },
   "file_denylist": [],
-  "startup": "chmod +x ./tidy && ./tidy && exec java -Xms128M -XX:MaxRAMPercentage=95.0 -Dterminal.jline=false -Dterminal.ansi=true -jar $(ls paper-*.jar 2>/dev/null || echo \"{{SERVER_JARFILE}}\")",
+  "startup": "tidy && exec java -Xms128M -XX:MaxRAMPercentage=95.0 -Dterminal.jline=false -Dterminal.ansi=true -jar $(ls paper-*.jar 2>/dev/null || echo \"{{SERVER_JARFILE}}\")",
   "config": {
     "files": {
       "server.properties": {
@@ -37,7 +37,7 @@
   },
   "scripts": {
     "installation": {
-      "script": "#!/bin/ash\n# Tidy Paper Java 25 Installation Script\n# Server Files Path: /mnt/server\n\napk update\napk add --no-cache curl git jq\n\ncd /mnt/server\n\necho \"===================================================\"\necho \" Installing Tidy Pre-Flight Container Orchestrator \"\necho \"===================================================\"\n\nGITHUB_REPO=\"Kenzi-Siaufandi/tidy\"\nif [ \"${TIDY_VERSION}\" = \"latest\" ] || [ -z \"${TIDY_VERSION}\" ]; then\n    DOWNLOAD_URL=$(curl -s \"https://api.github.com/repos/${GITHUB_REPO}/releases/latest\" | jq -r '.assets[] | select(.name==\"tidy\") | .browser_download_url')\n    if [ -z \"${DOWNLOAD_URL}\" ] || [ \"${DOWNLOAD_URL}\" = \"null\" ]; then\n        DOWNLOAD_URL=\"https://github.com/${GITHUB_REPO}/releases/latest/download/tidy\"\n    fi\nelse\n    DOWNLOAD_URL=\"https://github.com/${GITHUB_REPO}/releases/download/${TIDY_VERSION}/tidy\"\nfi\n\necho \"Downloading Tidy from ${DOWNLOAD_URL}...\"\ncurl -sSL -o tidy \"${DOWNLOAD_URL}\" || echo \"[!] Note: If release is not yet uploaded, please upload the tidy binary manually.\"\n\nif [ -f tidy ]; then\n    chmod +x tidy\n    echo \"[✓] Tidy binary installed successfully!\"\nfi\n\n# Accept EULA automatically\necho \"eula=true\" > eula.txt\n\necho \"===================================================\"\necho \" Installation Complete! Ready for Java 25 Startup \"\necho \"===================================================\"\n",
+      "script": "#!/bin/ash\n# Tidy Paper Java 25 Installation Script\n# Server Files Path: /mnt/server\n\ncd /mnt/server\n\necho \"===================================================\"\necho \" Installing Tidy Pre-Flight Container Orchestrator \"\necho \"===================================================\"\n\n# Accept Minecraft EULA automatically\necho \"eula=true\" > eula.txt\n\n# If using a custom image where tidy is already pre-installed, nothing to download\nif which tidy >/dev/null 2>&1; then\n    echo \"[✓] Tidy is already pre-installed in the container image!\"\nelse\n    # Fallback for standard Yolks images: download static binary\n    apk update && apk add --no-cache curl jq git\n    GITHUB_REPO=\"Kenzi-Siaufandi/tidy\"\n    if [ \"${TIDY_VERSION}\" = \"latest\" ] || [ -z \"${TIDY_VERSION}\" ]; then\n        DOWNLOAD_URL=$(curl -s \"https://api.github.com/repos/${GITHUB_REPO}/releases/latest\" | jq -r '.assets[] | select(.name==\"tidy\") | .browser_download_url')\n        if [ -z \"${DOWNLOAD_URL}\" ] || [ \"${DOWNLOAD_URL}\" = \"null\" ]; then\n            DOWNLOAD_URL=\"https://github.com/${GITHUB_REPO}/releases/latest/download/tidy\"\n        fi\n    else\n        DOWNLOAD_URL=\"https://github.com/${GITHUB_REPO}/releases/download/${TIDY_VERSION}/tidy\"\n    fi\n    echo \"Downloading Tidy from ${DOWNLOAD_URL}...\"\n    curl -sSL -o tidy \"${DOWNLOAD_URL}\" || echo \"[!] Note: Please upload the tidy binary manually if release is not yet published.\"\n    if [ -f tidy ]; then\n        chmod +x tidy\n        echo \"[✓] Tidy downloaded successfully!\"\n    fi\nfi\n\necho \"===================================================\"\necho \" Installation Complete! Ready for Java 25 Startup \"\necho \"===================================================\"\n",
       "container": "alpine:3.20",
       "entrypoint": "ash"
     }
@@ -126,7 +126,7 @@
     },
     {
       "name": "Tidy Version",
-      "description": "Version of Tidy orchestrator to download on install/reinstall (latest or specific release tag like v0.2.0).",
+      "description": "Version of Tidy orchestrator to download on install/reinstall if using fallback image (latest or specific release tag like v0.2.0).",
       "env_variable": "TIDY_VERSION",
       "default_value": "latest",
       "user_viewable": true,

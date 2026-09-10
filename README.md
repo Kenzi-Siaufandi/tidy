@@ -68,16 +68,27 @@ once = true
 
 ---
 
-## Usage in Pterodactyl Container
+---
 
-### Pterodactyl Startup Script / Entrypoint
+## Pterodactyl Deployment & Docker Image
+
+### Official Pre-Baked Docker Image
+A lightweight, production-ready container image targeting Java 25 is published directly to GitHub Container Registry (GHCR):
+
+```text
+ghcr.io/kenzi-siaufandi/tidy:java25
+```
+
+- **Pre-installed**: Java 25, Git, CA Certificates, Curl, and Tidy (`/usr/local/bin/tidy`).
+- **Instant Boot**: Zero install delays; no network calls to fetch binaries during container boot.
+- **CI/CD**: Automatically built and published on every commit via GitHub Actions.
+
+### Pterodactyl Custom Egg (`egg-tidy-paper.json`)
+Import [egg-tidy-paper.json](file:///home/exig/Projects/GoProjects/Tidy/egg-tidy-paper.json) into your Pterodactyl panel (**Admin -> Nests -> Minecraft -> Import Egg**).
+
+#### Startup Command:
 ```bash
-#!/bin/ash
-# Pre-flight container orchestration
-./tidy
-
-# Start Minecraft server with Java 25
-exec java -Xms${INIT_MEMORY}M -Xmx${MAX_MEMORY}M -jar $(ls paper-*.jar 2>/dev/null || echo "server.jar")
+tidy && exec java -Xms128M -XX:MaxRAMPercentage=95.0 -Dterminal.jline=false -Dterminal.ansi=true -jar $(ls paper-*.jar 2>/dev/null || echo "{{SERVER_JARFILE}}")
 ```
 
 ### Environment Variables
@@ -92,6 +103,7 @@ exec java -Xms${INIT_MEMORY}M -Xmx${MAX_MEMORY}M -jar $(ls paper-*.jar 2>/dev/nu
 ---
 
 ## Building from Source
+
 
 ```bash
 # Run all tests
