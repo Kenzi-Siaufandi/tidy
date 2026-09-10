@@ -1,7 +1,5 @@
 # Tidy
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/Kenzi-Siaufandi/tidy)](https://goreportcard.com/report/github.com/Kenzi-Siaufandi/tidy)
-
 A tiny, lightweight, zero-dependency Go CLI designed to act as a **pre-flight container orchestrator** inside Pterodactyl Minecraft server containers (targeting Java 25 runtimes).
 
 Tidy synchronizes declarative server configurations from Git, resolves and downloads server software via PaperMC Fill API, resolves and downloads plugins via Modrinth and direct URLs with cryptographic hash verification, and performs mustache-style `{{VAR_NAME}}` environment variable substitutions for database and plugin setups before the server launches.
