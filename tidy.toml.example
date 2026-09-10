@@ -1,5 +1,5 @@
 [server]
-# Enforces fill v4 API resolution; direct 'url' is not supported here
+# Enforces fill API resolution; direct 'url' is not supported here
 project = "paper"
 version = "26.2"
 
@@ -12,3 +12,32 @@ version = "2.11.2"
 source = "url"
 url = "https://github.com/MilkBowl/Vault/releases/download/1.7.3/Vault.jar"
 sha256 = "a6b5ed97f43a5cf5bbaf00a7c8cd23c5afc9bd003f849875af8b36e6cf77d01d"
+
+# --- Large Files & World Downloads (Direct HTTPS with Mandatory SHA-256) ---
+
+# Example 1: Minecraft World from Direct HTTPS Archive (.tar.gz / .zip)
+[files.overworld]
+source = "http"
+path = "world"                                                # Destination directory
+url = "https://downloads.example.com/worlds/hub-world-v1.tar.gz"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" # Mandatory 64-char hex SHA-256
+extract = true                                                # Automatically unpacks into path
+once = true                                                   # Protect player data: only download on first install / if missing
+
+# Example 2: Nether Dimension
+[worlds.nether]
+source = "http"
+path = "world_nether"
+url = "https://downloads.example.com/worlds/nether-template.zip"
+sha256 = "b8a8b167520e5c9a0bc43fdfb0d4c1b48b6f3c1b1842e47856d117a56114a1e9"
+extract = true
+once = true
+
+# Example 3: Standalone file (e.g. models or datasets)
+[files.custom_model_pack]
+source = "http"
+path = "plugins/ModelEngine/models.zip"
+url = "https://downloads.example.com/assets/models.zip"
+sha256 = "f2ca1bb6c7e907d06dafe4687e579fce76b37e4e93b7605022da52e6ccc26fd2"
+extract = false
+once = false

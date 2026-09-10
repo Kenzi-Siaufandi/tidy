@@ -13,10 +13,11 @@ import (
 	"github.com/Kenzi-Siaufandi/tidy/internal/git"
 	"github.com/Kenzi-Siaufandi/tidy/internal/resolver"
 	"github.com/Kenzi-Siaufandi/tidy/internal/state"
+	"github.com/Kenzi-Siaufandi/tidy/internal/storage"
 	"github.com/Kenzi-Siaufandi/tidy/internal/templating"
 )
 
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 func main() {
 	var (
@@ -49,13 +50,18 @@ func main() {
 	fmt.Println("==================================================================")
 
 	firstInstall := state.IsFirstInstall(workDir)
+	var previousState *state.State
 	if firstInstall {
 		fmt.Println("[*] Status: First install detected in container.")
 	} else {
-		fmt.Println("[*] Status: Existing installation found.")
+		fmt.Println("[*] Status: Existing installation found. Performing incremental reconciliation.")
+		previousState, err = state.LoadState(workDir)
+		if err != nil {
+			fmt.Printf("[!] Warning: failed to load existing state file: %v. Proceeding as fresh sync.\n", err)
+		}
 	}
 
-	// 1. Git Synchronization
+	// 1. Git Synchronization & Incremental Diff Engine
 	gitRepo := *gitRepoFlag
 	if gitRepo == "" {
 		for _, envKey := range []string{"GIT_REPO", "GIT_URL", "TIDY_GIT_REPO"} {
@@ -94,33 +100,61 @@ func main() {
 		gitUser = os.Getenv("GIT_USER")
 	}
 
-	var commitSHA string
+	var currentCommit string
 	if !*skipGitFlag && gitRepo != "" {
-		fmt.Printf("[*] Git: Synchronizing configs from %s (branch: %s)...\n", git.MaskURL(gitRepo), gitBranch)
 		gitClient, err := git.NewClient()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[!] Fatal: %v\n", err)
 			os.Exit(1)
 		}
 
-		commit, err := gitClient.Sync(git.Options{
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+
+		gitOpts := git.Options{
 			RepoURL:   gitRepo,
 			Branch:    gitBranch,
 			Token:     gitToken,
 			Username:  gitUser,
 			TargetDir: workDir,
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[!] Fatal: Git sync failed: %v\n", err)
-			os.Exit(1)
 		}
-		commitSHA = commit
-		fmt.Printf("[+] Git: Synced successfully (HEAD: %s)\n", commitSHA)
+
+		if firstInstall || !gitClient.IsGitRepo(workDir) {
+			fmt.Printf("[*] Git: Initializing clone from %s (branch: %s)...\n", git.MaskURL(gitRepo), gitBranch)
+			if err := gitClient.Clone(ctx, gitOpts); err != nil {
+				fmt.Fprintf(os.Stderr, "[!] Fatal: Git clone failed: %v\n", err)
+				os.Exit(1)
+			}
+			currentCommit, _ = gitClient.GetHeadCommit(ctx, workDir)
+			fmt.Printf("[+] Git: Initial clone complete (HEAD: %s)\n", currentCommit)
+		} else {
+			fmt.Printf("[*] Git: Checking for upstream updates from %s (branch: %s)...\n", git.MaskURL(gitRepo), gitBranch)
+			pullRes, err := gitClient.Pull(ctx, gitOpts)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[!] Fatal: Git pull failed: %v\n", err)
+				os.Exit(1)
+			}
+			currentCommit = pullRes.NewCommit
+
+			if pullRes.HasUpdates {
+				fmt.Printf("[+] Git: Pulled %d new commits (%s..%s):\n",
+					len(pullRes.Commits), pullRes.OldCommit[:7], pullRes.NewCommit[:7])
+				for _, cMsg := range pullRes.Commits {
+					fmt.Printf("    - %s\n", cMsg)
+				}
+				fmt.Printf("[*] Git: Modified files:\n")
+				for _, ch := range pullRes.ChangedFiles {
+					fmt.Printf("    [%s] %s\n", ch.Status, ch.Path)
+				}
+			} else {
+				fmt.Printf("[=] Git: Repository is up to date (commit %s)\n", currentCommit[:7])
+			}
+		}
 	} else if gitRepo == "" {
 		fmt.Println("[*] Git: No GIT_REPO specified; using local directory configs.")
 	}
 
-	// 2. Read tidy.toml
+	// 2. Read and Validate tidy.toml
 	configFile := *configFlag
 	if !filepath.IsAbs(configFile) {
 		configFile = filepath.Join(workDir, configFile)
@@ -140,23 +174,96 @@ func main() {
 
 	ctx := context.Background()
 
-	// 3. Resolve and Download Server Software (PaperMC Fill API)
-	fmt.Printf("[*] Server: Resolving %s %s (PaperMC Fill API)...\n", cfg.Server.Project, cfg.Server.Version)
-	paperClient := resolver.NewPaperClient("", nil)
-	serverRes, err := paperClient.ResolveAndDownload(ctx, cfg.Server, workDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[!] Fatal: Failed to resolve/download server software: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("[+] Server: Downloaded %s (Build #%d, SHA256: %s, %d bytes)\n",
-		serverRes.Filename, serverRes.BuildID, serverRes.SHA256[:12]+"...", serverRes.Size)
+	// 3. Reconcile Server Software (PaperMC Fill API with SHA-256)
+	var activeServerFilename string
+	var activeServerSHA256 string
+	var activeServerBuildID int
 
-	// 4. Resolve and Download Plugins
+	serverNeedsDownload := true
+	if previousState != nil && previousState.Server.Project == cfg.Server.Project && previousState.Server.Version == cfg.Server.Version {
+		// Server project and version match previous state. Verify local file existence and SHA-256.
+		localJar := filepath.Join(workDir, previousState.Server.Filename)
+		if state.VerifyLocalSHA256(localJar, previousState.Server.SHA256) {
+			fmt.Printf("[=] Server: %s is up-to-date (SHA-256 verified, skipped download)\n", previousState.Server.Filename)
+			activeServerFilename = previousState.Server.Filename
+			activeServerSHA256 = previousState.Server.SHA256
+			activeServerBuildID = previousState.Server.BuildID
+			serverNeedsDownload = false
+		} else {
+			fmt.Printf("[*] Server: %s is missing or checksum changed. Re-downloading...\n", previousState.Server.Filename)
+		}
+	} else if previousState != nil && (previousState.Server.Project != cfg.Server.Project || previousState.Server.Version != cfg.Server.Version) {
+		fmt.Printf("[*] Server: Version changed from %s %s to %s %s. Upgrading...\n",
+			previousState.Server.Project, previousState.Server.Version, cfg.Server.Project, cfg.Server.Version)
+		// Clean up old server jar
+		if previousState.Server.Filename != "" {
+			_ = os.Remove(filepath.Join(workDir, previousState.Server.Filename))
+		}
+	}
+
+	if serverNeedsDownload {
+		fmt.Printf("[*] Server: Resolving %s %s (PaperMC Fill API)...\n", cfg.Server.Project, cfg.Server.Version)
+		paperClient := resolver.NewPaperClient("", nil)
+		serverRes, err := paperClient.ResolveAndDownload(ctx, cfg.Server, workDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[!] Fatal: Failed to resolve/download server software: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("[+] Server: Downloaded %s (Build #%d, SHA256: %s, %d bytes)\n",
+			serverRes.Filename, serverRes.BuildID, serverRes.SHA256[:12]+"...", serverRes.Size)
+		activeServerFilename = serverRes.Filename
+		activeServerSHA256 = serverRes.SHA256
+		activeServerBuildID = serverRes.BuildID
+	}
+
+	// 4. Reconcile Plugins (Added, Updated, Removed, Unchanged with SHA-256)
 	installedPlugins := make(map[string]state.PluginState)
 	modClient := resolver.NewModrinthClient("", "", nil)
 
+	// A. Detect removed plugins (present in previous state but removed from tidy.toml)
+	if previousState != nil {
+		for oldName, oldP := range previousState.Plugins {
+			if _, stillPresent := cfg.Plugins[oldName]; !stillPresent {
+				fmt.Printf("[-] Plugin [%s]: Removed from tidy.toml. Deleting %s...\n", oldName, oldP.Filename)
+				oldPath := filepath.Join(workDir, "plugins", oldP.Filename)
+				if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+					fmt.Printf("[!] Warning: failed to delete removed plugin %s: %v\n", oldPath, err)
+				}
+			}
+		}
+	}
+
+	// B. Reconcile active plugins in tidy.toml
 	for pluginName, pCfg := range cfg.Plugins {
 		source := strings.ToLower(pCfg.Source)
+
+		// Check if plugin is already in state and unchanged
+		if previousState != nil {
+			oldP, exists := previousState.Plugins[pluginName]
+			if exists && oldP.Source == source {
+				versionMatch := true
+				if source == "modrinth" && oldP.Version != pCfg.Version {
+					versionMatch = false
+				}
+
+				if versionMatch {
+					localPath := filepath.Join(workDir, "plugins", oldP.Filename)
+					// Check local file existence and SHA-256
+					if oldP.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldP.SHA256) {
+						fmt.Printf("[=] Plugin [%s]: %s is up-to-date (SHA-256 verified, skipped download)\n", pluginName, oldP.Filename)
+						installedPlugins[pluginName] = oldP
+						continue
+					}
+				}
+
+				// If version changed, clean up previous jar before downloading new one
+				if !versionMatch && oldP.Filename != "" {
+					fmt.Printf("[*] Plugin [%s]: Version changed (%s -> %s). Upgrading...\n", pluginName, oldP.Version, pCfg.Version)
+					_ = os.Remove(filepath.Join(workDir, "plugins", oldP.Filename))
+				}
+			}
+		}
+
 		switch source {
 		case "modrinth":
 			fmt.Printf("[*] Plugin [%s]: Resolving from Modrinth (%s v%s)...\n", pluginName, pCfg.ProjectID, pCfg.Version)
@@ -165,8 +272,8 @@ func main() {
 				fmt.Fprintf(os.Stderr, "[!] Fatal: Failed to download plugin %q: %v\n", pluginName, err)
 				os.Exit(1)
 			}
-			fmt.Printf("[+] Plugin [%s]: Saved %s (%s: %s, %d bytes)\n",
-				pluginName, res.Filename, strings.ToUpper(res.HashAlgo), res.Hash[:12]+"...", res.Size)
+			fmt.Printf("[+] Plugin [%s]: Saved %s (SHA256: %s, %d bytes)\n",
+				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)
 
 			installedPlugins[pluginName] = state.PluginState{
 				Source:   "modrinth",
@@ -174,28 +281,64 @@ func main() {
 				Version:  pCfg.Version,
 				HashAlgo: res.HashAlgo,
 				Hash:     res.Hash,
+				SHA256:   res.SHA256,
 			}
 
 		case "url":
-			fmt.Printf("[*] Plugin [%s]: Downloading from direct URL...\n", pluginName)
+			fmt.Printf("[*] Plugin [%s]: Downloading from direct URL with mandatory SHA-256...\n", pluginName)
 			res, err := resolver.ResolveAndDownloadURL(ctx, pluginName, pCfg, workDir, nil)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[!] Fatal: Failed to download plugin %q: %v\n", pluginName, err)
 				os.Exit(1)
 			}
 			fmt.Printf("[+] Plugin [%s]: Saved %s (SHA256: %s, %d bytes)\n",
-				pluginName, res.Filename, res.Hash[:12]+"...", res.Size)
+				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)
 
 			installedPlugins[pluginName] = state.PluginState{
 				Source:   "url",
 				Filename: res.Filename,
 				HashAlgo: "sha256",
 				Hash:     res.Hash,
+				SHA256:   res.SHA256,
 			}
 		}
 	}
 
-	// 5. Template Variable Replacement (Mustache {{VAR_NAME}})
+	// 5. Reconcile Large Files & Worlds ([files.*] and [worlds.*]) with Mandatory SHA-256
+	allFiles := cfg.GetAllFiles()
+	installedFiles := make(map[string]state.FileState)
+	if len(allFiles) > 0 {
+		storageMgr := storage.NewManager(nil)
+		for name, fCfg := range allFiles {
+			syncRes, err := storageMgr.SyncFile(ctx, name, fCfg, workDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[!] Fatal: Failed to synchronize file/world %q: %v\n", name, err)
+				os.Exit(1)
+			}
+
+			if syncRes.Skipped {
+				fmt.Printf("[=] World/File [%s]: %s (%s)\n", name, filepath.Base(syncRes.Path), syncRes.Reason)
+			} else {
+				if syncRes.Extracted {
+					fmt.Printf("[+] World/File [%s]: Extracted %d files to %s (SHA-256 verified)\n",
+						name, syncRes.Files, fCfg.Path)
+				} else {
+					fmt.Printf("[+] World/File [%s]: Saved to %s (SHA-256 verified)\n",
+						name, fCfg.Path)
+				}
+			}
+
+			installedFiles[name] = state.FileState{
+				Path:      fCfg.Path,
+				URL:       fCfg.URL,
+				SHA256:    syncRes.SHA256,
+				SyncedAt:  time.Now().UTC(),
+				Extracted: fCfg.Extract,
+			}
+		}
+	}
+
+	// 6. Template Variable Replacement (Mustache {{VAR_NAME}})
 	if !*skipTplFlag && !cfg.Templates.Disabled {
 		fmt.Println("[*] Templates: Scanning config files for {{VAR_NAME}} variable replacements...")
 		tplResult, err := templating.ProcessDirectory(workDir, cfg.Templates.Paths)
@@ -207,29 +350,35 @@ func main() {
 		}
 	}
 
-	// 6. Save State Metadata
+	// 7. Save State Metadata
+	installedAt := time.Now().UTC()
+	if previousState != nil && !previousState.InstalledAt.IsZero() {
+		installedAt = previousState.InstalledAt
+	}
+
 	currentState := &state.State{
-		InstalledAt:  time.Now().UTC(),
+		InstalledAt:  installedAt,
 		LastSyncedAt: time.Now().UTC(),
-		GitCommit:    commitSHA,
+		GitCommit:    currentCommit,
 		Server: state.ServerState{
-			Project:  serverRes.Project,
-			Version:  serverRes.Version,
-			BuildID:  serverRes.BuildID,
-			Filename: serverRes.Filename,
-			SHA256:   serverRes.SHA256,
+			Project:  cfg.Server.Project,
+			Version:  cfg.Server.Version,
+			BuildID:  activeServerBuildID,
+			Filename: activeServerFilename,
+			SHA256:   activeServerSHA256,
 		},
 		Plugins: installedPlugins,
+		Files:   installedFiles,
 	}
 
 	if err := state.SaveState(workDir, currentState); err != nil {
 		fmt.Fprintf(os.Stderr, "[!] Warning: Failed to save .tidy/state.json: %v\n", err)
 	} else {
-		fmt.Println("[+] State: Saved installation state to .tidy/state.json")
+		fmt.Println("[+] State: Saved updated state to .tidy/state.json")
 	}
 
 	fmt.Println("==================================================================")
 	fmt.Println("  [✓] Pre-flight orchestration completed successfully!")
-	fmt.Printf("  Container is ready for Java 25 startup: java -jar %s\n", serverRes.Filename)
+	fmt.Printf("  Container is ready for Java 25 startup: java -jar %s\n", activeServerFilename)
 	fmt.Println("==================================================================")
 }

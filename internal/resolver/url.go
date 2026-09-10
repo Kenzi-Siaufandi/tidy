@@ -54,6 +54,7 @@ func ResolveAndDownloadURL(ctx context.Context, pluginName string, pCfg config.P
 		FilePath:   res.Path,
 		HashAlgo:   "sha256",
 		Hash:       res.ComputedHash,
+		SHA256:     res.ComputedHash,
 		Size:       res.Size,
 	}, nil
 }

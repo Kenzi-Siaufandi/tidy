@@ -66,7 +66,7 @@ func TestMaskURL(t *testing.T) {
 	}
 }
 
-func TestGitClient_LocalCloneAndCommit(t *testing.T) {
+func TestGitClient_CloneAndIncrementalPull(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed, skipping test")
 	}
@@ -79,7 +79,6 @@ func TestGitClient_LocalCloneAndCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Initialize origin repository
 	runCmd := func(dir string, args ...string) {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
@@ -106,40 +105,87 @@ func TestGitClient_LocalCloneAndCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Test Sync to targetDir
 	opts := Options{
 		RepoURL:   originDir,
 		Branch:    "main",
 		TargetDir: targetDir,
 	}
 
-	commit, err := client.Sync(opts)
+	// 1. Initial Clone
+	commit1, err := client.Sync(opts)
 	if err != nil {
-		t.Fatalf("sync failed: %v", err)
+		t.Fatalf("initial sync failed: %v", err)
+	}
+	if len(commit1) != 40 {
+		t.Errorf("expected 40-char commit SHA, got %s", commit1)
 	}
 
-	if len(commit) != 40 {
-		t.Errorf("expected 40-char commit SHA, got %s", commit)
-	}
-
-	if !client.IsGitRepo(targetDir) {
-		t.Error("expected targetDir to be a git repo")
-	}
-
-	// Read cloned tidy.toml
+	// 2. Simulate local modification (as done by template engine)
 	clonedFile := filepath.Join(targetDir, "tidy.toml")
-	if _, err := os.Stat(clonedFile); err != nil {
-		t.Errorf("tidy.toml was not cloned: %v", err)
+	if err := os.WriteFile(clonedFile, []byte("[server]\nproject='paper-templated'\nversion='26.2'\n"), 0644); err != nil {
+		t.Fatal(err)
 	}
 
-	// Test calling Sync again when already cloned
-	commit2, err := client.Sync(opts)
+	// 3. Commit a new change in origin
+	newFile := filepath.Join(originDir, "config.yml")
+	if err := os.WriteFile(newFile, []byte("key: value\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(testFile, []byte("[server]\nproject='paper'\nversion='26.3'\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(originDir, "add", "config.yml", "tidy.toml")
+	runCmd(originDir, "commit", "-m", "update version and add config")
+
+	// 4. Test Pull with local dirty changes - should reset and pull cleanly
+	pullRes, err := client.Pull(context.Background(), opts)
 	if err != nil {
-		t.Fatalf("second sync failed: %v", err)
-	}
-	if commit2 != commit {
-		t.Errorf("expected same commit SHA %s, got %s", commit, commit2)
+		t.Fatalf("incremental pull failed: %v", err)
 	}
 
-	_, _ = client.GetHeadCommit(context.Background(), targetDir)
+	if !pullRes.HasUpdates {
+		t.Errorf("expected HasUpdates to be true")
+	}
+	if pullRes.OldCommit != commit1 {
+		t.Errorf("expected old commit %s, got %s", commit1, pullRes.OldCommit)
+	}
+	if len(pullRes.Commits) == 0 {
+		t.Errorf("expected at least 1 commit message in pull result")
+	}
+
+	// Check changed files
+	foundTidy := false
+	foundConfig := false
+	for _, ch := range pullRes.ChangedFiles {
+		if ch.Path == "tidy.toml" && ch.Status == "M" {
+			foundTidy = true
+		}
+		if ch.Path == "config.yml" && ch.Status == "A" {
+			foundConfig = true
+		}
+	}
+	if !foundTidy {
+		t.Errorf("expected tidy.toml to be marked as Modified [M]")
+	}
+	if !foundConfig {
+		t.Errorf("expected config.yml to be marked as Added [A]")
+	}
+
+	// Verify local target directory has updated content
+	updatedTidy, err := os.ReadFile(clonedFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(updatedTidy) != "[server]\nproject='paper'\nversion='26.3'\n" {
+		t.Errorf("cloned tidy.toml did not match pulled content: %s", string(updatedTidy))
+	}
+
+	// 5. Test Pull again when no new updates exist
+	pullRes2, err := client.Pull(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("second pull failed: %v", err)
+	}
+	if pullRes2.HasUpdates {
+		t.Errorf("expected HasUpdates to be false for up-to-date repo")
+	}
 }

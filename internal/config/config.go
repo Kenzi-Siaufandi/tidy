@@ -12,9 +12,11 @@ import (
 
 // Config represents the top-level tidy.toml specification.
 type Config struct {
-	Server    ServerConfig            `toml:"server"`
+	Server    ServerConfig          `toml:"server"`
 	Plugins   map[string]PluginConfig `toml:"plugins"`
-	Templates TemplateConfig          `toml:"templates"`
+	Files     map[string]FileConfig `toml:"files"`
+	Worlds    map[string]FileConfig `toml:"worlds"`
+	Templates TemplateConfig        `toml:"templates"`
 }
 
 // ServerConfig defines the server software jar configuration.
@@ -31,7 +33,25 @@ type PluginConfig struct {
 	ProjectID string `toml:"project_id"` // required for modrinth
 	Version   string `toml:"version"`    // required for modrinth
 	URL       string `toml:"url"`        // required for url
-	SHA256    string `toml:"sha256"`     // mandatory for url, optional for others
+	SHA256    string `toml:"sha256"`     // mandatory for url, optional for modrinth
+}
+
+// FileConfig defines a large file or world asset download.
+type FileConfig struct {
+	Source  string `toml:"source"`  // "http" or "url"
+	Path    string `toml:"path"`    // target directory or file destination
+	URL     string `toml:"url"`     // direct HTTPS/HTTP URL
+	SHA256  string `toml:"sha256"`  // MANDATORY: 64-char hex SHA-256
+	Extract bool   `toml:"extract"` // whether to uncompress .zip / .tar.gz / .tgz / .tar
+	Once    *bool  `toml:"once"`    // defaults to true (protects existing world/file data on reboot)
+}
+
+// IsOnce returns true if Once is unset (nil) or explicitly true.
+func (f *FileConfig) IsOnce() bool {
+	if f.Once == nil {
+		return true
+	}
+	return *f.Once
 }
 
 // TemplateConfig defines template replacement settings.
@@ -63,6 +83,21 @@ func ParseConfig(data []byte) (*Config, error) {
 	return &cfg, nil
 }
 
+// GetAllFiles returns a combined map of all files and worlds.
+func (c *Config) GetAllFiles() map[string]FileConfig {
+	result := make(map[string]FileConfig)
+	for k, v := range c.Files {
+		result[k] = v
+	}
+	for k, v := range c.Worlds {
+		// If worlds has an entry with the same name, files takes precedence
+		if _, exists := result[k]; !exists {
+			result[k] = v
+		}
+	}
+	return result
+}
+
 // Validate verifies that the configuration conforms to all requirements.
 func (c *Config) Validate() error {
 	// Validate Server
@@ -90,6 +125,11 @@ func (c *Config) Validate() error {
 			if strings.TrimSpace(p.Version) == "" {
 				return fmt.Errorf("plugin %q: modrinth source requires 'version'", name)
 			}
+			if sha := strings.TrimSpace(p.SHA256); sha != "" {
+				if err := validateSHA256Hex(sha); err != nil {
+					return fmt.Errorf("plugin %q: invalid 'sha256': %w", name, err)
+				}
+			}
 		case "url":
 			if strings.TrimSpace(p.URL) == "" {
 				return fmt.Errorf("plugin %q: url source requires 'url'", name)
@@ -98,15 +138,39 @@ func (c *Config) Validate() error {
 			if sha == "" {
 				return fmt.Errorf("plugin %q: url source MUST provide 'sha256' for verification", name)
 			}
-			if len(sha) != 64 {
-				return fmt.Errorf("plugin %q: 'sha256' must be a 64-character hex string", name)
-			}
-			if _, err := hex.DecodeString(sha); err != nil {
-				return fmt.Errorf("plugin %q: invalid hex format in 'sha256': %w", name, err)
+			if err := validateSHA256Hex(sha); err != nil {
+				return fmt.Errorf("plugin %q: invalid 'sha256': %w", name, err)
 			}
 		default:
 			return fmt.Errorf("plugin %q: unsupported source %q (supported: 'modrinth', 'url')", name, p.Source)
 		}
+	}
+
+	// Validate Files and Worlds (All must have mandatory SHA-256)
+	validateFileSection := func(sectionName string, items map[string]FileConfig) error {
+		for name, f := range items {
+			if strings.TrimSpace(f.Path) == "" {
+				return fmt.Errorf("%s %q: 'path' destination directory or file path is required", sectionName, name)
+			}
+			if strings.TrimSpace(f.URL) == "" {
+				return fmt.Errorf("%s %q: 'url' is required", sectionName, name)
+			}
+			sha := strings.TrimSpace(f.SHA256)
+			if sha == "" {
+				return fmt.Errorf("%s %q: MUST provide 'sha256' for verification", sectionName, name)
+			}
+			if err := validateSHA256Hex(sha); err != nil {
+				return fmt.Errorf("%s %q: invalid 'sha256': %w", sectionName, name, err)
+			}
+		}
+		return nil
+	}
+
+	if err := validateFileSection("files", c.Files); err != nil {
+		return err
+	}
+	if err := validateFileSection("worlds", c.Worlds); err != nil {
+		return err
 	}
 
 	// Default template paths if none configured
@@ -127,5 +191,15 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	return nil
+}
+
+func validateSHA256Hex(sha string) error {
+	if len(sha) != 64 {
+		return fmt.Errorf("expected 64 hex characters, got %d", len(sha))
+	}
+	if _, err := hex.DecodeString(sha); err != nil {
+		return fmt.Errorf("invalid hexadecimal characters: %w", err)
+	}
 	return nil
 }

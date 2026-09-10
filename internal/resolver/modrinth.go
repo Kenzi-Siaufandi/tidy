@@ -2,8 +2,11 @@ package resolver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -73,6 +76,7 @@ type PluginDownloadResult struct {
 	FilePath   string
 	HashAlgo   string
 	Hash       string
+	SHA256     string
 	Size       int64
 }
 
@@ -164,6 +168,22 @@ func (c *ModrinthClient) ResolveAndDownload(ctx context.Context, pluginName stri
 		return nil, fmt.Errorf("failed to download and verify plugin %s from Modrinth: %w", pluginName, err)
 	}
 
+	// Compute SHA-256 for universal cache tracking
+	computedSHA256, err := computeLocalSHA256(res.Path)
+	if err != nil {
+		_ = os.Remove(res.Path)
+		return nil, fmt.Errorf("failed to compute SHA-256 for plugin %s: %w", pluginName, err)
+	}
+
+	// If user explicitly configured sha256 in tidy.toml, enforce it
+	if expectedSHA := strings.TrimSpace(pCfg.SHA256); expectedSHA != "" {
+		if !strings.EqualFold(computedSHA256, expectedSHA) {
+			_ = os.Remove(res.Path)
+			return nil, fmt.Errorf("SHA-256 verification failed for Modrinth plugin %s: expected %s, computed %s",
+				pluginName, expectedSHA, computedSHA256)
+		}
+	}
+
 	return &PluginDownloadResult{
 		PluginName: pluginName,
 		Source:     "modrinth",
@@ -171,6 +191,21 @@ func (c *ModrinthClient) ResolveAndDownload(ctx context.Context, pluginName stri
 		FilePath:   res.Path,
 		HashAlgo:   hashAlgo,
 		Hash:       res.ComputedHash,
+		SHA256:     computedSHA256,
 		Size:       res.Size,
 	}, nil
+}
+
+func computeLocalSHA256(filePath string) (string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
