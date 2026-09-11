@@ -155,6 +155,11 @@ func (c *Config) Validate() error {
 			if strings.TrimSpace(f.URL) == "" {
 				return fmt.Errorf("%s %q: 'url' is required", sectionName, name)
 			}
+			switch strings.ToLower(strings.TrimSpace(f.Source)) {
+			case "", "http", "https", "url":
+			default:
+				return fmt.Errorf("%s %q: unsupported source %q (supported: 'http', 'https', 'url')", sectionName, name, f.Source)
+			}
 			sha := strings.TrimSpace(f.SHA256)
 			if sha == "" {
 				return fmt.Errorf("%s %q: MUST provide 'sha256' for verification", sectionName, name)
