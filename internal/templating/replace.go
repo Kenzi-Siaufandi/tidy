@@ -67,6 +67,10 @@ func IsSupportedConfigFile(path string) bool {
 
 // ProcessFile applies template replacements to a single file.
 func ProcessFile(path string) (int, []string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to stat file %q: %w", path, err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to read file %q: %w", path, err)
@@ -74,8 +78,32 @@ func ProcessFile(path string) (int, []string, error) {
 
 	newContent, count, missing := ReplaceString(string(data))
 	if count > 0 {
-		if err := os.WriteFile(path, []byte(newContent), 0644); err != nil {
+		mode := info.Mode().Perm()
+		if mode == 0 {
+			mode = 0644
+		}
+		tmp, err := os.CreateTemp(filepath.Dir(path), ".tidy-tpl-*")
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to create temp file for %q: %w", path, err)
+		}
+		tmpName := tmp.Name()
+		if _, err := tmp.Write([]byte(newContent)); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
 			return 0, nil, fmt.Errorf("failed to write templated file %q: %w", path, err)
+		}
+		if err := tmp.Chmod(mode); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+			return 0, nil, fmt.Errorf("failed to chmod templated file %q: %w", path, err)
+		}
+		if err := tmp.Close(); err != nil {
+			_ = os.Remove(tmpName)
+			return 0, nil, fmt.Errorf("failed to close templated file %q: %w", path, err)
+		}
+		if err := os.Rename(tmpName, path); err != nil {
+			_ = os.Remove(tmpName)
+			return 0, nil, fmt.Errorf("failed to replace templated file %q: %w", path, err)
 		}
 	}
 
