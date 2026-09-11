@@ -15,9 +15,10 @@ import (
 	"github.com/Kenzi-Siaufandi/tidy/internal/state"
 	"github.com/Kenzi-Siaufandi/tidy/internal/storage"
 	"github.com/Kenzi-Siaufandi/tidy/internal/templating"
+	"github.com/Kenzi-Siaufandi/tidy/internal/version"
 )
 
-const Version = "0.2.1"
+const Version = version.Version
 
 func main() {
 	var (

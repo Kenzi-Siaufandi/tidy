@@ -12,12 +12,13 @@ import (
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/config"
 	"github.com/Kenzi-Siaufandi/tidy/internal/state"
+	"github.com/Kenzi-Siaufandi/tidy/internal/version"
 )
 
-const (
-	DefaultModrinthBaseURL   = "https://api.modrinth.com"
-	DefaultModrinthUserAgent = "Kenzi-Siaufandi/tidy/0.1.0 (https://github.com/Kenzi-Siaufandi)"
-)
+const DefaultModrinthBaseURL = "https://api.modrinth.com"
+
+// DefaultModrinthUserAgent is built from the single version source.
+var DefaultModrinthUserAgent = "Kenzi-Siaufandi/tidy/" + version.Version + " (https://github.com/Kenzi-Siaufandi/tidy)"
 
 // ModrinthVersion represents a version item in Modrinth API.
 type ModrinthVersion struct {

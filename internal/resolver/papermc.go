@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/config"
+	"github.com/Kenzi-Siaufandi/tidy/internal/version"
 )
 
 const DefaultFillBaseURL = "https://fill.papermc.io"
@@ -129,7 +130,7 @@ func (c *PaperClient) FetchBuild(ctx context.Context, serverCfg config.ServerCon
 		return nil, nil, fmt.Errorf("failed to create PaperMC API request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "tidy/1.0 (Pterodactyl Pre-Flight Orchestrator)")
+	req.Header.Set("User-Agent", "tidy/"+version.Version+" (Pterodactyl Pre-Flight Orchestrator)")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
