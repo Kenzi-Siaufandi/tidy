@@ -43,15 +43,17 @@ func (m *Manager) SyncFile(ctx context.Context, name string, fCfg config.FileCon
 		destPath = filepath.Join(workDir, destPath)
 	}
 
-	// 1. Check if target exists and once=true (protect existing world/file data)
+	// 1. Check if target exists and once=true (protect existing world/file data).
+	// Skipped targets are unverified: SHA256 stays empty so state never
+	// records the config hash as if it were checked.
 	if fCfg.IsOnce() {
 		if _, err := os.Stat(destPath); err == nil {
 			return &SyncResult{
 				Name:    name,
 				Path:    destPath,
-				SHA256:  fCfg.SHA256,
+				SHA256:  "",
 				Skipped: true,
-				Reason:  "target path already exists on disk (once=true)",
+				Reason:  "target path already exists on disk (once=true, unverified)",
 			}, nil
 		}
 	}
