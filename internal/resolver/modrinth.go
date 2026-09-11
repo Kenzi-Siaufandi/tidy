@@ -2,11 +2,8 @@ package resolver
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/config"
+	"github.com/Kenzi-Siaufandi/tidy/internal/state"
 )
 
 const (
@@ -169,7 +167,7 @@ func (c *ModrinthClient) ResolveAndDownload(ctx context.Context, pluginName stri
 	}
 
 	// Compute SHA-256 for universal cache tracking
-	computedSHA256, err := computeLocalSHA256(res.Path)
+	computedSHA256, err := state.ComputeFileSHA256(res.Path)
 	if err != nil {
 		_ = os.Remove(res.Path)
 		return nil, fmt.Errorf("failed to compute SHA-256 for plugin %s: %w", pluginName, err)
@@ -194,18 +192,4 @@ func (c *ModrinthClient) ResolveAndDownload(ctx context.Context, pluginName stri
 		SHA256:     computedSHA256,
 		Size:       res.Size,
 	}, nil
-}
-
-func computeLocalSHA256(filePath string) (string, error) {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
