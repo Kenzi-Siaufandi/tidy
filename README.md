@@ -47,8 +47,6 @@ source = "url"
 url = "https://github.com/MilkBowl/Vault/releases/download/1.7.3/Vault.jar"
 sha256 = "a6b5ed97f43a5cf5bbaf00a7c8cd23c5afc9bd003f849875af8b36e6cf77d01d"
 
-# --- Phase 2: Large Files & Worlds (Direct HTTPS with Mandatory SHA-256) ---
-
 [files.overworld]
 source = "http"
 path = "world"                                                # Destination directory
@@ -84,11 +82,11 @@ ghcr.io/kenzi-siaufandi/tidy:java25
 - **CI/CD**: Automatically built and published on every commit via GitHub Actions.
 
 ### Pterodactyl Custom Egg (`egg-tidy-paper.json`)
-Import [egg-tidy-paper.json](file:///home/exig/Projects/GoProjects/Tidy/egg-tidy-paper.json) into your Pterodactyl panel (**Admin -> Nests -> Minecraft -> Import Egg**).
+Import [egg-tidy-paper.json](egg-tidy-paper.json) into your Pterodactyl panel (**Admin -> Nests -> Minecraft -> Import Egg**).
 
 #### Startup Command:
 ```bash
-tidy && exec java -Xms128M -XX:MaxRAMPercentage=95.0 -Dterminal.jline=false -Dterminal.ansi=true -jar $(ls paper-*.jar 2>/dev/null || echo "{{SERVER_JARFILE}}")
+tidy && exec java -Dname={{SERVER_IP}}:{{SERVER_PORT}} -XX:MaxRAM={{SERVER_MEMORY}}M {{FLAG}} -jar {{SERVER_JARFILE}}
 ```
 
 ### Environment Variables

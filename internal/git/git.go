@@ -111,6 +111,90 @@ func (c *Client) ResetWorkingTree(ctx context.Context, dir string) error {
 	return nil
 }
 
+// isDirEmpty returns true if a directory does not exist or has no entries.
+func isDirEmpty(dir string) bool {
+	f, err := os.Open(dir)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+
+	names, err := f.Readdirnames(1)
+	return err != nil || len(names) == 0
+}
+
+// cloneInPlace handles cloning into an existing non-empty directory (e.g. /home/container in Pterodactyl).
+// It initializes a git repository in place, fetches the target branch, and force checks out the tree.
+func (c *Client) cloneInPlace(ctx context.Context, authURL string, opts Options) error {
+	if err := os.MkdirAll(opts.TargetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create target directory %s: %w", opts.TargetDir, err)
+	}
+
+	// 1. git init
+	initCmd := exec.CommandContext(ctx, c.GitPath, "init")
+	initCmd.Dir = opts.TargetDir
+	var stderr bytes.Buffer
+	initCmd.Stderr = &stderr
+	if err := initCmd.Run(); err != nil {
+		return fmt.Errorf("git init failed in %s: %s (%w)", opts.TargetDir, strings.TrimSpace(stderr.String()), err)
+	}
+
+	// 2. git remote add or set-url
+	remoteCmd := exec.CommandContext(ctx, c.GitPath, "remote", "add", "origin", authURL)
+	remoteCmd.Dir = opts.TargetDir
+	stderr.Reset()
+	remoteCmd.Stderr = &stderr
+	if err := remoteCmd.Run(); err != nil {
+		setUrlCmd := exec.CommandContext(ctx, c.GitPath, "remote", "set-url", "origin", authURL)
+		setUrlCmd.Dir = opts.TargetDir
+		stderr.Reset()
+		setUrlCmd.Stderr = &stderr
+		if err := setUrlCmd.Run(); err != nil {
+			errOut := stderr.String()
+			if opts.Token != "" {
+				errOut = strings.ReplaceAll(errOut, opts.Token, "******")
+			}
+			return fmt.Errorf("git remote set-url failed: %s (%w)", strings.TrimSpace(errOut), err)
+		}
+	}
+
+	// 3. git fetch --depth 1 origin <branch>
+	fetchCmd := exec.CommandContext(ctx, c.GitPath, "fetch", "--depth", "1", "origin", opts.Branch)
+	fetchCmd.Dir = opts.TargetDir
+	stderr.Reset()
+	fetchCmd.Stderr = &stderr
+	if err := fetchCmd.Run(); err != nil {
+		errOut := stderr.String()
+		if opts.Token != "" {
+			errOut = strings.ReplaceAll(errOut, opts.Token, "******")
+		}
+		return fmt.Errorf("git fetch failed for branch %q: %s (%w)", opts.Branch, strings.TrimSpace(errOut), err)
+	}
+
+	// 4. git checkout -f -B <branch> FETCH_HEAD
+	checkoutCmd := exec.CommandContext(ctx, c.GitPath, "checkout", "-f", "-B", opts.Branch, "FETCH_HEAD")
+	checkoutCmd.Dir = opts.TargetDir
+	stderr.Reset()
+	checkoutCmd.Stderr = &stderr
+	if err := checkoutCmd.Run(); err != nil {
+		return fmt.Errorf("git checkout failed: %s (%w)", strings.TrimSpace(stderr.String()), err)
+	}
+
+	// 5. Best-effort branch upstream tracking
+	trackCmd := exec.CommandContext(ctx, c.GitPath, "branch", "-u", fmt.Sprintf("origin/%s", opts.Branch), opts.Branch)
+	trackCmd.Dir = opts.TargetDir
+	_ = trackCmd.Run()
+
+	// 6. Mask secrets in stored config if token was used
+	if opts.Token != "" && opts.RepoURL != "" {
+		maskRemoteCmd := exec.CommandContext(ctx, c.GitPath, "remote", "set-url", "origin", opts.RepoURL)
+		maskRemoteCmd.Dir = opts.TargetDir
+		_ = maskRemoteCmd.Run()
+	}
+
+	return nil
+}
+
 // Clone performs a shallow clone of the repository into targetDir.
 func (c *Client) Clone(ctx context.Context, opts Options) error {
 	if opts.RepoURL == "" {
@@ -128,6 +212,12 @@ func (c *Client) Clone(ctx context.Context, opts Options) error {
 		return err
 	}
 
+	// If the target directory already exists and contains files (e.g. /home/container in Pterodactyl),
+	// standard git clone will fail. Use cloneInPlace to initialize and checkout cleanly.
+	if !isDirEmpty(opts.TargetDir) {
+		return c.cloneInPlace(ctx, authURL, opts)
+	}
+
 	args := []string{
 		"clone",
 		"--depth", "1",
@@ -141,8 +231,11 @@ func (c *Client) Clone(ctx context.Context, opts Options) error {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		// Mask any secrets that might appear in stderr
 		errOut := stderr.String()
+		// Fallback in case directory became non-empty concurrently
+		if strings.Contains(errOut, "already exists and is not an empty directory") {
+			return c.cloneInPlace(ctx, authURL, opts)
+		}
 		if opts.Token != "" {
 			errOut = strings.ReplaceAll(errOut, opts.Token, "******")
 		}

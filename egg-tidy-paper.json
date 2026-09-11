@@ -16,7 +16,7 @@
     "Java 25 (Official Yolks: ghcr.io/pterodactyl/yolks:java_25)": "ghcr.io/pterodactyl/yolks:java_25"
   },
   "file_denylist": [],
-  "startup": "tidy && exec java -Xms128M -XX:MaxRAMPercentage=95.0 -Dterminal.jline=false -Dterminal.ansi=true -jar $(ls paper-*.jar 2>/dev/null || echo \"{{SERVER_JARFILE}}\")",
+  "startup": "tidy && exec java -Dname={{SERVER_IP}}:{{SERVER_PORT}} -XX:MaxRAM={{SERVER_MEMORY}}M {{FLAG}} -jar {{SERVER_JARFILE}}",
   "config": {
     "files": {
       "server.properties": {
@@ -132,6 +132,15 @@
       "user_viewable": true,
       "user_editable": true,
       "rules": "required|string|max:32"
+    },
+    {
+      "name": "Additional Flags",
+      "description": "Additional Java/JVM flags passed to the server on startup.",
+      "env_variable": "FLAG",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "nullable|string"
     }
   ]
 }

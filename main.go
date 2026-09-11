@@ -17,7 +17,7 @@ import (
 	"github.com/Kenzi-Siaufandi/tidy/internal/templating"
 )
 
-const Version = "0.2.0"
+const Version = "0.2.1"
 
 func main() {
 	var (
@@ -35,7 +35,7 @@ func main() {
 	flag.Parse()
 
 	if *versionFlag {
-		fmt.Printf("Tidy v%s - Pterodactyl Pre-Flight Orchestrator\n", Version)
+		fmt.Printf("Tidy v%s\n", Version)
 		os.Exit(0)
 	}
 
@@ -46,7 +46,7 @@ func main() {
 	}
 
 	fmt.Println("==================================================================")
-	fmt.Printf("  Tidy v%s - Minecraft Pre-Flight Orchestrator (Java 25 Target)\n", Version)
+	fmt.Printf("  Tidy v%s \n", Version)
 	fmt.Println("==================================================================")
 
 	firstInstall := state.IsFirstInstall(workDir)

@@ -189,3 +189,85 @@ func TestGitClient_CloneAndIncrementalPull(t *testing.T) {
 		t.Errorf("expected HasUpdates to be false for up-to-date repo")
 	}
 }
+
+func TestGitClient_CloneNonEmptyDirectory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed, skipping test")
+	}
+
+	tmpDir := t.TempDir()
+	originDir := filepath.Join(tmpDir, "origin")
+	targetDir := filepath.Join(tmpDir, "target")
+
+	if err := os.MkdirAll(originDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-create files in targetDir as Pterodactyl does (eula.txt, tidy binary)
+	eulaFile := filepath.Join(targetDir, "eula.txt")
+	if err := os.WriteFile(eulaFile, []byte("eula=true\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tidyBin := filepath.Join(targetDir, "tidy")
+	if err := os.WriteFile(tidyBin, []byte("#!/bin/sh\necho tidy\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runCmd := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %s (%v)", args, string(out), err)
+		}
+	}
+
+	runCmd(originDir, "init")
+	runCmd(originDir, "config", "user.email", "test@test.com")
+	runCmd(originDir, "config", "user.name", "Test User")
+	runCmd(originDir, "checkout", "-b", "main")
+
+	testFile := filepath.Join(originDir, "tidy.toml")
+	if err := os.WriteFile(testFile, []byte("[server]\nproject='paper'\nversion='26.2'\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(originDir, "add", "tidy.toml")
+	runCmd(originDir, "commit", "-m", "initial commit")
+
+	client, err := NewClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := Options{
+		RepoURL:   originDir,
+		Branch:    "main",
+		TargetDir: targetDir,
+	}
+
+	// Should succeed without error even though targetDir is not empty
+	commit, err := client.Sync(opts)
+	if err != nil {
+		t.Fatalf("sync into non-empty directory failed: %v", err)
+	}
+	if len(commit) != 40 {
+		t.Errorf("expected 40-char commit SHA, got %s", commit)
+	}
+
+	// Verify existing files are preserved
+	if _, err := os.Stat(eulaFile); err != nil {
+		t.Errorf("expected eula.txt to be preserved: %v", err)
+	}
+	if _, err := os.Stat(tidyBin); err != nil {
+		t.Errorf("expected tidy binary to be preserved: %v", err)
+	}
+
+	// Verify cloned file exists
+	clonedTidy := filepath.Join(targetDir, "tidy.toml")
+	if _, err := os.Stat(clonedTidy); err != nil {
+		t.Errorf("expected tidy.toml to be cloned: %v", err)
+	}
+}
+
