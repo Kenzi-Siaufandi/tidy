@@ -12,6 +12,13 @@ import (
 	"strings"
 )
 
+const (
+	// MaxArchiveFiles caps entries per archive to stop zip bombs.
+	MaxArchiveFiles = 10000
+	// MaxArchiveTotalBytes caps total decompressed output (2 GiB).
+	MaxArchiveTotalBytes = int64(2 << 30)
+)
+
 // ExtractArchive unpacks a .zip, .tar.gz, .tgz, or .tar archive into destDir.
 func ExtractArchive(archivePath, destDir string) (int, error) {
 	if err := os.MkdirAll(destDir, 0755); err != nil {
@@ -55,8 +62,12 @@ func extractZip(zipPath, destDir string) (int, error) {
 
 	cleanDest := filepath.Clean(destDir)
 	count := 0
+	var totalBytes int64
 
 	for _, f := range r.File {
+		if count >= MaxArchiveFiles {
+			return count, fmt.Errorf("archive exceeds file limit of %d", MaxArchiveFiles)
+		}
 		targetPath := filepath.Join(cleanDest, f.Name)
 		// ZipSlip protection
 		if !strings.HasPrefix(filepath.Clean(targetPath), cleanDest+string(os.PathSeparator)) && filepath.Clean(targetPath) != cleanDest {
@@ -68,6 +79,10 @@ func extractZip(zipPath, destDir string) (int, error) {
 				return count, err
 			}
 			continue
+		}
+
+		if f.UncompressedSize64 > uint64(MaxArchiveTotalBytes) {
+			return count, fmt.Errorf("archive entry %q exceeds size limit", f.Name)
 		}
 
 		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
@@ -86,7 +101,7 @@ func extractZip(zipPath, destDir string) (int, error) {
 			return count, fmt.Errorf("failed to create output file %q: %w", targetPath, err)
 		}
 
-		_, copyErr := io.Copy(outFile, rc)
+		written, copyErr := io.Copy(outFile, io.LimitReader(rc, MaxArchiveTotalBytes-totalBytes+1))
 		closeErr := outFile.Close()
 		rc.Close()
 
@@ -95,6 +110,11 @@ func extractZip(zipPath, destDir string) (int, error) {
 		}
 		if closeErr != nil {
 			return count, fmt.Errorf("failed to close file %q: %w", targetPath, closeErr)
+		}
+		totalBytes += written
+		if totalBytes > MaxArchiveTotalBytes {
+			_ = os.Remove(targetPath)
+			return count, fmt.Errorf("archive exceeds total size limit of %d bytes", MaxArchiveTotalBytes)
 		}
 
 		count++
@@ -132,6 +152,7 @@ func extractTar(tarPath, destDir string) (int, error) {
 func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 	cleanDest := filepath.Clean(destDir)
 	count := 0
+	var totalBytes int64
 
 	for {
 		header, err := tr.Next()
@@ -154,6 +175,12 @@ func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 				return count, err
 			}
 		case tar.TypeReg:
+			if count >= MaxArchiveFiles {
+				return count, fmt.Errorf("archive exceeds file limit of %d", MaxArchiveFiles)
+			}
+			if header.Size > MaxArchiveTotalBytes {
+				return count, fmt.Errorf("archive entry %q exceeds size limit", header.Name)
+			}
 			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 				return count, err
 			}
@@ -168,7 +195,7 @@ func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 				return count, fmt.Errorf("failed to create output file %q: %w", targetPath, err)
 			}
 
-			_, copyErr := io.Copy(outFile, tr)
+			written, copyErr := io.Copy(outFile, io.LimitReader(tr, MaxArchiveTotalBytes-totalBytes+1))
 			closeErr := outFile.Close()
 			if copyErr != nil {
 				return count, fmt.Errorf("failed to write tar entry %q: %w", targetPath, copyErr)
@@ -176,7 +203,15 @@ func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 			if closeErr != nil {
 				return count, fmt.Errorf("failed to close output file %q: %w", targetPath, closeErr)
 			}
+			totalBytes += written
+			if totalBytes > MaxArchiveTotalBytes {
+				_ = os.Remove(targetPath)
+				return count, fmt.Errorf("archive exceeds total size limit of %d bytes", MaxArchiveTotalBytes)
+			}
 			count++
+		default:
+			// Skip symlinks, hardlinks, devices: do not follow.
+			continue
 		}
 	}
 
