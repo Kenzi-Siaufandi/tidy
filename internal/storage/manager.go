@@ -43,6 +43,15 @@ func (m *Manager) SyncFile(ctx context.Context, name string, fCfg config.FileCon
 		destPath = filepath.Join(workDir, destPath)
 	}
 
+	if info, err := os.Stat(destPath); err == nil {
+		if fCfg.Extract && !info.IsDir() {
+			return nil, fmt.Errorf("file/world %q: extract=true requires a directory path, got file %q", name, fCfg.Path)
+		}
+		if !fCfg.Extract && info.IsDir() && !fCfg.IsOnce() {
+			return nil, fmt.Errorf("file/world %q: extract=false requires a file path, got directory %q", name, fCfg.Path)
+		}
+	}
+
 	// 1. Check if target exists and once=true (protect existing world/file data).
 	// Skipped targets are unverified: SHA256 stays empty so state never
 	// records the config hash as if it were checked.
