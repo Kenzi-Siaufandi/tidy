@@ -3,6 +3,7 @@ package templating
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,7 +34,7 @@ database:
 	expectedSubstring4 := "database: {{UNSET_DATABASE_NAME}}"
 
 	for _, sub := range []string{expectedSubstring1, expectedSubstring2, expectedSubstring3, expectedSubstring4} {
-		if !contains(res, sub) {
+		if !strings.Contains(res, sub) {
 			t.Errorf("expected result to contain %q, but got:\n%s", sub, res)
 		}
 	}
@@ -80,10 +81,10 @@ data:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !contains(string(updatedData), `username: "mc_user"`) {
+	if !strings.Contains(string(updatedData), `username: "mc_user"`) {
 		t.Errorf("config.yml username not replaced: %s", string(updatedData))
 	}
-	if !contains(string(updatedData), `password: "secret123"`) {
+	if !strings.Contains(string(updatedData), `password: "secret123"`) {
 		t.Errorf("config.yml password not replaced: %s", string(updatedData))
 	}
 
@@ -95,17 +96,4 @@ data:
 	if string(jarData) != "binary jar data {{MYSQL_USER}}" {
 		t.Errorf("jar file was unexpectedly modified")
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || (len(s) > 0 && len(substr) > 0 && searchSubstr(s, substr)))
-}
-
-func searchSubstr(s, substr string) bool {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

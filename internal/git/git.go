@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // Options specifies the Git synchronization parameters.
@@ -435,30 +434,4 @@ func (c *Client) Pull(ctx context.Context, opts Options) (*PullResult, error) {
 		Commits:      commits,
 		ChangedFiles: changedFiles,
 	}, nil
-}
-
-// Sync performs the first-boot clone or detects existing repository and pulls.
-func (c *Client) Sync(opts Options) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	if c.IsGitRepo(opts.TargetDir) {
-		// Existing installation: pull remote updates
-		pullRes, err := c.Pull(ctx, opts)
-		if err != nil {
-			return "", err
-		}
-		return pullRes.NewCommit, nil
-	}
-
-	// Clean/first install clone
-	if err := c.Clone(ctx, opts); err != nil {
-		return "", err
-	}
-
-	commit, err := c.GetHeadCommit(ctx, opts.TargetDir)
-	if err != nil {
-		return "unknown", nil
-	}
-	return commit, nil
 }

@@ -47,17 +47,6 @@ func ReplaceString(content string) (string, int, []string) {
 	return result, replacements, missingVars
 }
 
-// IsSensitiveVar checks whether a variable name looks like a secret/credential.
-func IsSensitiveVar(name string) bool {
-	upper := strings.ToUpper(name)
-	for _, keyword := range []string{"PASSWORD", "SECRET", "TOKEN", "KEY", "AUTH", "PASS"} {
-		if strings.Contains(upper, keyword) {
-			return true
-		}
-	}
-	return false
-}
-
 // IsSupportedConfigFile checks if a file extension is typically a text configuration file.
 func IsSupportedConfigFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))

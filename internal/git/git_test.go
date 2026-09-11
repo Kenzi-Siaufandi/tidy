@@ -112,9 +112,12 @@ func TestGitClient_CloneAndIncrementalPull(t *testing.T) {
 	}
 
 	// 1. Initial Clone
-	commit1, err := client.Sync(opts)
+	if err := client.Clone(context.Background(), opts); err != nil {
+		t.Fatalf("initial clone failed: %v", err)
+	}
+	commit1, err := client.GetHeadCommit(context.Background(), targetDir)
 	if err != nil {
-		t.Fatalf("initial sync failed: %v", err)
+		t.Fatalf("get head commit failed: %v", err)
 	}
 	if len(commit1) != 40 {
 		t.Errorf("expected 40-char commit SHA, got %s", commit1)
@@ -248,9 +251,12 @@ func TestGitClient_CloneNonEmptyDirectory(t *testing.T) {
 	}
 
 	// Should succeed without error even though targetDir is not empty
-	commit, err := client.Sync(opts)
+	if err := client.Clone(context.Background(), opts); err != nil {
+		t.Fatalf("clone into non-empty directory failed: %v", err)
+	}
+	commit, err := client.GetHeadCommit(context.Background(), targetDir)
 	if err != nil {
-		t.Fatalf("sync into non-empty directory failed: %v", err)
+		t.Fatalf("get head commit failed: %v", err)
 	}
 	if len(commit) != 40 {
 		t.Errorf("expected 40-char commit SHA, got %s", commit)
