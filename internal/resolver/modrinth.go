@@ -130,16 +130,19 @@ func (c *ModrinthClient) ResolveAndDownload(ctx context.Context, pluginName stri
 		}
 	}
 
-	// Determine hash algorithm
+	// Determine hash algorithm, strongest first.
 	var hashAlgo, expectedHash string
-	if sha512Hash, ok := selectedFile.Hashes["sha512"]; ok && sha512Hash != "" {
+	if h, ok := selectedFile.Hashes["sha512"]; ok && strings.TrimSpace(h) != "" {
 		hashAlgo = "sha512"
-		expectedHash = sha512Hash
-	} else if sha1Hash, ok := selectedFile.Hashes["sha1"]; ok && sha1Hash != "" {
+		expectedHash = strings.TrimSpace(h)
+	} else if h, ok := selectedFile.Hashes["sha256"]; ok && strings.TrimSpace(h) != "" {
+		hashAlgo = "sha256"
+		expectedHash = strings.TrimSpace(h)
+	} else if h, ok := selectedFile.Hashes["sha1"]; ok && strings.TrimSpace(h) != "" {
 		hashAlgo = "sha1"
-		expectedHash = sha1Hash
+		expectedHash = strings.TrimSpace(h)
 	} else {
-		return nil, fmt.Errorf("no supported cryptographic hash (sha512/sha1) found for file %q in Modrinth version %s",
+		return nil, fmt.Errorf("no supported cryptographic hash (sha512/sha256/sha1) found for file %q in Modrinth version %s",
 			selectedFile.Filename, targetVer.VersionNumber)
 	}
 
