@@ -14,5 +14,9 @@ world/
 cache/
 .tidy/
 
+# Local env with secrets
+.env
+.env.*
+
 # Test directories
 test-workspace/
