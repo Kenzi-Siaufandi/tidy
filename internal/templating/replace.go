@@ -20,9 +20,10 @@ type ReplaceResult struct {
 }
 
 // ReplaceString replaces {{VAR_NAME}} placeholders with environment variables.
-// If an environment variable is not present, it leaves the placeholder unchanged and records it.
+// If an environment variable is not present, it leaves the placeholder unchanged and records it once.
 func ReplaceString(content string) (string, int, []string) {
 	replacements := 0
+	seen := make(map[string]struct{})
 	var missingVars []string
 
 	result := MustacheVariableRegex.ReplaceAllStringFunc(content, func(match string) string {
@@ -33,7 +34,10 @@ func ReplaceString(content string) (string, int, []string) {
 		varName := submatches[1]
 		val, exists := os.LookupEnv(varName)
 		if !exists {
-			missingVars = append(missingVars, varName)
+			if _, ok := seen[varName]; !ok {
+				seen[varName] = struct{}{}
+				missingVars = append(missingVars, varName)
+			}
 			return match
 		}
 		replacements++
