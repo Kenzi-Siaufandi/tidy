@@ -79,7 +79,8 @@ func extractZip(zipPath, destDir string) (int, error) {
 			return count, fmt.Errorf("failed to open file %q in zip: %w", f.Name, err)
 		}
 
-		outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode())
+		mode := sanitizeFileMode(f.Mode())
+		outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 		if err != nil {
 			rc.Close()
 			return count, fmt.Errorf("failed to create output file %q: %w", targetPath, err)
@@ -157,7 +158,7 @@ func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 				return count, err
 			}
 
-			mode := os.FileMode(header.Mode)
+			mode := sanitizeFileMode(os.FileMode(header.Mode))
 			if mode == 0 {
 				mode = 0644
 			}
@@ -180,6 +181,16 @@ func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 	}
 
 	return count, nil
+}
+
+// sanitizeFileMode strips setuid/setgid/sticky bits and limits to owner/group/other
+// permission bits, preventing privilege escalation via crafted archives.
+func sanitizeFileMode(m os.FileMode) os.FileMode {
+	perm := m.Perm() & 0777
+	if perm == 0 {
+		return 0644
+	}
+	return os.FileMode(perm)
 }
 
 // CleanStaleSessionLock looks for session.lock in world directories and removes them
