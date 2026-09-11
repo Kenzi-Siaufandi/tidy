@@ -24,7 +24,7 @@ Tidy synchronizes declarative server configurations from Git, reconciles changes
   - Stream archive extraction (`extract = true`) for `.zip`, `.tar.gz`, `.tgz`, and `.tar` using Go standard library.
   - **Player data protection (`once = true` by default)**: Only downloads if the target directory does not exist, protecting player survival progress from being wiped on container restart.
   - Automatically detects and removes stale `session.lock` files left over from unclean container terminations.
-- **Mustache Config Templating**: Scans `.yml`, `.yaml`, `.properties`, `.json`, `.conf`, `.toml` files and replaces `{{VAR_NAME}}` placeholders with container environment variables (e.g. `{{DB_HOST}}`, `{{DB_PASSWORD}}`).
+- **Mustache Config Templating**: Scans `.yml`, `.yaml`, `.properties`, `.json`, `.conf`, `.toml`, `.txt`, `.cfg`, `.env` files and replaces `{{VAR_NAME}}` placeholders with container environment variables (e.g. `{{DB_HOST}}`, `{{DB_PASSWORD}}`). Skips `.git`, `.tidy`, and `cache` directories. Honors `[templates] paths` globs when set.
 - **State Tracking**: Writes `.tidy/state.json` recording installed artifacts, commit SHAs, and SHA-256 hashes across container boots.
 
 ---
