@@ -59,6 +59,10 @@ func (c *Client) IsGitRepo(dir string) bool {
 }
 
 // BuildAuthURL constructs an authenticated HTTPS URL if a token is provided.
+//
+// Deprecated: kept for backward compatibility and tests. New code must use
+// askPass auth (see setupAskPass) so tokens never appear in process args or
+// .git/config.
 func BuildAuthURL(rawURL, username, token string) (string, error) {
 	if token == "" {
 		return rawURL, nil
@@ -98,6 +102,99 @@ func MaskURL(rawURL string) string {
 	return u.String()
 }
 
+// ShortSHA returns the first 7 characters of a commit SHA, or a safe
+// placeholder when the SHA is empty/short. Prevents slice-out-of-range
+// panics on unexpected rev-parse output.
+func ShortSHA(commit string) string {
+	commit = strings.TrimSpace(commit)
+	if commit == "" {
+		return "unknown"
+	}
+	if len(commit) < 7 {
+		return commit
+	}
+	return commit[:7]
+}
+
+// needsAskPass reports whether token auth applies (HTTP(S) URL + token set).
+func needsAskPass(rawURL, token string) bool {
+	if strings.TrimSpace(token) == "" {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "http" || u.Scheme == "https"
+}
+
+// setupAskPass creates a temporary GIT_ASKPASS script that serves the token
+// (and username) from env vars, so credentials never appear in argv or logs.
+// Returns extra env vars to set and a cleanup func.
+func setupAskPass(token, username string) (extraEnv []string, cleanup func(), err error) {
+	cleanup = func() {}
+	if strings.TrimSpace(token) == "" {
+		return nil, cleanup, nil
+	}
+	askUser := strings.TrimSpace(username)
+	if askUser == "" {
+		// Preserve legacy https://<token>@host behavior: token as username.
+		askUser = token
+	}
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  *[Uu]sername*) printf '%s' \"$TIDY_GIT_USER\" ;;\n" +
+		"  *) printf '%s' \"$TIDY_GIT_TOKEN\" ;;\n" +
+		"esac\n"
+	f, err := os.CreateTemp("", "tidy-askpass-*")
+	if err != nil {
+		return nil, cleanup, fmt.Errorf("failed to create askpass script: %w", err)
+	}
+	scriptPath := f.Name()
+	if _, err := f.WriteString(script); err != nil {
+		_ = os.Remove(scriptPath)
+		return nil, cleanup, fmt.Errorf("failed to write askpass script: %w", err)
+	}
+	_ = f.Close()
+	if err := os.Chmod(scriptPath, 0700); err != nil {
+		_ = os.Remove(scriptPath)
+		return nil, cleanup, fmt.Errorf("failed to secure askpass script: %w", err)
+	}
+	cleanup = func() { _ = os.Remove(scriptPath) }
+	extraEnv = []string{
+		"GIT_ASKPASS=" + scriptPath,
+		"GIT_TERMINAL_PROMPT=0",
+		"TIDY_GIT_TOKEN=" + token,
+		"TIDY_GIT_USER=" + askUser,
+	}
+	return extraEnv, cleanup, nil
+}
+
+// gitCmd builds a git command with ASKPASS env wired when token auth applies.
+func (c *Client) gitCmd(ctx context.Context, dir string, opts Options, args ...string) (*exec.Cmd, func(), error) {
+	cmd := exec.CommandContext(ctx, c.GitPath, args...)
+	cmd.Dir = dir
+	cleanup := func() {}
+	if needsAskPass(opts.RepoURL, opts.Token) {
+		extra, cl, err := setupAskPass(opts.Token, opts.Username)
+		if err != nil {
+			return nil, cleanup, err
+		}
+		cleanup = cl
+		cmd.Env = append(os.Environ(), extra...)
+	}
+	return cmd, cleanup, nil
+}
+
+// sanitizeGitError redacts any residual token from git stderr.
+func sanitizeGitError(out string, token string) string {
+	out = strings.TrimSpace(out)
+	if token != "" {
+		out = strings.ReplaceAll(out, token, "******")
+	}
+	return out
+}
+
 // ResetWorkingTree resets all tracked files in the repository to HEAD,
 // discarding any local template variable replacements so Git merges cleanly.
 func (c *Client) ResetWorkingTree(ctx context.Context, dir string) error {
@@ -125,7 +222,8 @@ func isDirEmpty(dir string) bool {
 
 // cloneInPlace handles cloning into an existing non-empty directory (e.g. /home/container in Pterodactyl).
 // It initializes a git repository in place, fetches the target branch, and force checks out the tree.
-func (c *Client) cloneInPlace(ctx context.Context, authURL string, opts Options) error {
+// Credentials are supplied via GIT_ASKPASS; the stored remote URL never contains the token.
+func (c *Client) cloneInPlace(ctx context.Context, opts Options) error {
 	if err := os.MkdirAll(opts.TargetDir, 0755); err != nil {
 		return fmt.Errorf("failed to create target directory %s: %w", opts.TargetDir, err)
 	}
@@ -139,36 +237,32 @@ func (c *Client) cloneInPlace(ctx context.Context, authURL string, opts Options)
 		return fmt.Errorf("git init failed in %s: %s (%w)", opts.TargetDir, strings.TrimSpace(stderr.String()), err)
 	}
 
-	// 2. git remote add or set-url
-	remoteCmd := exec.CommandContext(ctx, c.GitPath, "remote", "add", "origin", authURL)
+	// 2. git remote add or set-url (always plain URL, no token)
+	plainURL := opts.RepoURL
+	remoteCmd := exec.CommandContext(ctx, c.GitPath, "remote", "add", "origin", plainURL)
 	remoteCmd.Dir = opts.TargetDir
 	stderr.Reset()
 	remoteCmd.Stderr = &stderr
 	if err := remoteCmd.Run(); err != nil {
-		setUrlCmd := exec.CommandContext(ctx, c.GitPath, "remote", "set-url", "origin", authURL)
+		setUrlCmd := exec.CommandContext(ctx, c.GitPath, "remote", "set-url", "origin", plainURL)
 		setUrlCmd.Dir = opts.TargetDir
 		stderr.Reset()
 		setUrlCmd.Stderr = &stderr
 		if err := setUrlCmd.Run(); err != nil {
-			errOut := stderr.String()
-			if opts.Token != "" {
-				errOut = strings.ReplaceAll(errOut, opts.Token, "******")
-			}
-			return fmt.Errorf("git remote set-url failed: %s (%w)", strings.TrimSpace(errOut), err)
+			return fmt.Errorf("git remote set-url failed: %s (%w)", sanitizeGitError(stderr.String(), opts.Token), err)
 		}
 	}
 
-	// 3. git fetch --depth 1 origin <branch>
-	fetchCmd := exec.CommandContext(ctx, c.GitPath, "fetch", "--depth", "1", "origin", opts.Branch)
-	fetchCmd.Dir = opts.TargetDir
+	// 3. git fetch --depth 1 origin <branch> (ASKPASS supplies token)
+	fetchCmd, cleanup, err := c.gitCmd(ctx, opts.TargetDir, opts, "fetch", "--depth", "1", "origin", opts.Branch)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	stderr.Reset()
 	fetchCmd.Stderr = &stderr
 	if err := fetchCmd.Run(); err != nil {
-		errOut := stderr.String()
-		if opts.Token != "" {
-			errOut = strings.ReplaceAll(errOut, opts.Token, "******")
-		}
-		return fmt.Errorf("git fetch failed for branch %q: %s (%w)", opts.Branch, strings.TrimSpace(errOut), err)
+		return fmt.Errorf("git fetch failed for branch %q: %s (%w)", opts.Branch, sanitizeGitError(stderr.String(), opts.Token), err)
 	}
 
 	// 4. git checkout -f -B <branch> FETCH_HEAD
@@ -185,13 +279,6 @@ func (c *Client) cloneInPlace(ctx context.Context, authURL string, opts Options)
 	trackCmd.Dir = opts.TargetDir
 	_ = trackCmd.Run()
 
-	// 6. Mask secrets in stored config if token was used
-	if opts.Token != "" && opts.RepoURL != "" {
-		maskRemoteCmd := exec.CommandContext(ctx, c.GitPath, "remote", "set-url", "origin", opts.RepoURL)
-		maskRemoteCmd.Dir = opts.TargetDir
-		_ = maskRemoteCmd.Run()
-	}
-
 	return nil
 }
 
@@ -207,26 +294,25 @@ func (c *Client) Clone(ctx context.Context, opts Options) error {
 		opts.TargetDir = "."
 	}
 
-	authURL, err := BuildAuthURL(opts.RepoURL, opts.Username, opts.Token)
-	if err != nil {
-		return err
-	}
-
 	// If the target directory already exists and contains files (e.g. /home/container in Pterodactyl),
 	// standard git clone will fail. Use cloneInPlace to initialize and checkout cleanly.
 	if !isDirEmpty(opts.TargetDir) {
-		return c.cloneInPlace(ctx, authURL, opts)
+		return c.cloneInPlace(ctx, opts)
 	}
 
 	args := []string{
 		"clone",
 		"--depth", "1",
 		"--branch", opts.Branch,
-		authURL,
+		opts.RepoURL,
 		opts.TargetDir,
 	}
 
-	cmd := exec.CommandContext(ctx, c.GitPath, args...)
+	cmd, cleanup, err := c.gitCmd(ctx, "", opts, args...)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -234,12 +320,9 @@ func (c *Client) Clone(ctx context.Context, opts Options) error {
 		errOut := stderr.String()
 		// Fallback in case directory became non-empty concurrently
 		if strings.Contains(errOut, "already exists and is not an empty directory") {
-			return c.cloneInPlace(ctx, authURL, opts)
+			return c.cloneInPlace(ctx, opts)
 		}
-		if opts.Token != "" {
-			errOut = strings.ReplaceAll(errOut, opts.Token, "******")
-		}
-		return fmt.Errorf("git clone failed for %s: %s (%w)", MaskURL(opts.RepoURL), strings.TrimSpace(errOut), err)
+		return fmt.Errorf("git clone failed for %s: %s (%w)", MaskURL(opts.RepoURL), sanitizeGitError(errOut, opts.Token), err)
 	}
 
 	return nil
@@ -273,29 +356,23 @@ func (c *Client) Pull(ctx context.Context, opts Options) (*PullResult, error) {
 		return nil, err
 	}
 
-	authURL, err := BuildAuthURL(opts.RepoURL, opts.Username, opts.Token)
-	if err != nil {
-		return nil, err
-	}
-
-	// 2. Fetch updates
+	// 2. Fetch updates (ASKPASS supplies token; remote URL stays clean)
 	fetchArgs := []string{"fetch", "--depth", "10"}
 	if opts.RepoURL != "" {
-		fetchArgs = append(fetchArgs, authURL, branch)
+		fetchArgs = append(fetchArgs, opts.RepoURL, branch)
 	} else {
 		fetchArgs = append(fetchArgs, "origin", branch)
 	}
 
-	fetchCmd := exec.CommandContext(ctx, c.GitPath, fetchArgs...)
-	fetchCmd.Dir = opts.TargetDir
+	fetchCmd, cleanup, err := c.gitCmd(ctx, opts.TargetDir, opts, fetchArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
 	var stderr bytes.Buffer
 	fetchCmd.Stderr = &stderr
 	if err := fetchCmd.Run(); err != nil {
-		errOut := stderr.String()
-		if opts.Token != "" {
-			errOut = strings.ReplaceAll(errOut, opts.Token, "******")
-		}
-		return nil, fmt.Errorf("git fetch failed: %s (%w)", strings.TrimSpace(errOut), err)
+		return nil, fmt.Errorf("git fetch failed: %s (%w)", sanitizeGitError(stderr.String(), opts.Token), err)
 	}
 
 	// Determine FETCH_HEAD commit

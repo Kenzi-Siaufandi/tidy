@@ -64,7 +64,11 @@ func (m *Manager) SyncFile(ctx context.Context, name string, fCfg config.FileCon
 			return nil, fmt.Errorf("failed to create .tidy directory: %w", err)
 		}
 
-		tmpArchive := filepath.Join(tidyDir, fmt.Sprintf("%s.archive.tmp", name))
+		safeName, err := resolver.SafeArchiveName(name)
+		if err != nil {
+			return nil, err
+		}
+		tmpArchive := filepath.Join(tidyDir, safeName+".archive.tmp")
 
 		dlRes, err := resolver.DownloadAndVerify(ctx, resolver.DownloadOptions{
 			URL:           fCfg.URL,

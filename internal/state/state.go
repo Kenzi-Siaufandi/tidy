@@ -37,12 +37,14 @@ type ServerState struct {
 
 // PluginState records installed plugin metadata and verification hashes.
 type PluginState struct {
-	Source   string `json:"source"`
-	Filename string `json:"filename"`
-	Version  string `json:"version,omitempty"`
-	HashAlgo string `json:"hash_algo"`
-	Hash     string `json:"hash"`
-	SHA256   string `json:"sha256,omitempty"` // always computed for local cache validation
+	Source    string `json:"source"`
+	Filename  string `json:"filename"`
+	Version   string `json:"version,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+	URL       string `json:"url,omitempty"`
+	HashAlgo  string `json:"hash_algo"`
+	Hash      string `json:"hash"`
+	SHA256    string `json:"sha256,omitempty"` // always computed for local cache validation
 }
 
 // FileState records synchronized large files or world assets.

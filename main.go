@@ -125,8 +125,14 @@ func main() {
 				fmt.Fprintf(os.Stderr, "[!] Fatal: Git clone failed: %v\n", err)
 				os.Exit(1)
 			}
-			currentCommit, _ = gitClient.GetHeadCommit(ctx, workDir)
-			fmt.Printf("[+] Git: Initial clone complete (HEAD: %s)\n", currentCommit)
+			headCommit, headErr := gitClient.GetHeadCommit(ctx, workDir)
+			if headErr != nil {
+				fmt.Fprintf(os.Stderr, "[!] Warning: failed to get HEAD commit after clone: %v\n", headErr)
+				currentCommit = ""
+			} else {
+				currentCommit = headCommit
+			}
+			fmt.Printf("[+] Git: Initial clone complete (HEAD: %s)\n", git.ShortSHA(currentCommit))
 		} else {
 			fmt.Printf("[*] Git: Checking for upstream updates from %s (branch: %s)...\n", git.MaskURL(gitRepo), gitBranch)
 			pullRes, err := gitClient.Pull(ctx, gitOpts)
@@ -138,7 +144,7 @@ func main() {
 
 			if pullRes.HasUpdates {
 				fmt.Printf("[+] Git: Pulled %d new commits (%s..%s):\n",
-					len(pullRes.Commits), pullRes.OldCommit[:7], pullRes.NewCommit[:7])
+					len(pullRes.Commits), git.ShortSHA(pullRes.OldCommit), git.ShortSHA(pullRes.NewCommit))
 				for _, cMsg := range pullRes.Commits {
 					fmt.Printf("    - %s\n", cMsg)
 				}
@@ -147,7 +153,7 @@ func main() {
 					fmt.Printf("    [%s] %s\n", ch.Status, ch.Path)
 				}
 			} else {
-				fmt.Printf("[=] Git: Repository is up to date (commit %s)\n", currentCommit[:7])
+				fmt.Printf("[=] Git: Repository is up to date (commit %s)\n", git.ShortSHA(currentCommit))
 			}
 		}
 	} else if gitRepo == "" {
@@ -184,26 +190,57 @@ func main() {
 		// Server project and version match previous state. Verify local file existence and SHA-256.
 		localJar := filepath.Join(workDir, previousState.Server.Filename)
 		if state.VerifyLocalSHA256(localJar, previousState.Server.SHA256) {
-			fmt.Printf("[=] Server: %s is up-to-date (SHA-256 verified, skipped download)\n", previousState.Server.Filename)
-			activeServerFilename = previousState.Server.Filename
-			activeServerSHA256 = previousState.Server.SHA256
-			activeServerBuildID = previousState.Server.BuildID
-			serverNeedsDownload = false
+			requestedBuild := strings.TrimSpace(cfg.Server.Build)
+			if requestedBuild == "" {
+				requestedBuild = "latest"
+			}
+			if strings.EqualFold(requestedBuild, "latest") {
+				// Auto-update: check upstream for a newer build.
+				paperCheck := resolver.NewPaperClient("", nil)
+				upstreamResp, _, fetchErr := paperCheck.FetchBuild(ctx, cfg.Server)
+				if fetchErr != nil {
+					fmt.Printf("[!] Warning: failed to check upstream build for updates, keeping local %s: %v\n", previousState.Server.Filename, fetchErr)
+					activeServerFilename = previousState.Server.Filename
+					activeServerSHA256 = previousState.Server.SHA256
+					activeServerBuildID = previousState.Server.BuildID
+					serverNeedsDownload = false
+				} else if upstreamResp.ID == previousState.Server.BuildID && previousState.Server.BuildID != 0 {
+					fmt.Printf("[=] Server: %s is up-to-date (build #%d, SHA-256 verified, skipped download)\n", previousState.Server.Filename, previousState.Server.BuildID)
+					activeServerFilename = previousState.Server.Filename
+					activeServerSHA256 = previousState.Server.SHA256
+					activeServerBuildID = previousState.Server.BuildID
+					serverNeedsDownload = false
+				} else {
+					fmt.Printf("[*] Server: New upstream build #%d available (local #%d). Updating...\n", upstreamResp.ID, previousState.Server.BuildID)
+				}
+			} else {
+				// Pinned build: skip only if stored build ID matches request.
+				if fmt.Sprintf("%d", previousState.Server.BuildID) == requestedBuild {
+					fmt.Printf("[=] Server: %s is up-to-date (SHA-256 verified, skipped download)\n", previousState.Server.Filename)
+					activeServerFilename = previousState.Server.Filename
+					activeServerSHA256 = previousState.Server.SHA256
+					activeServerBuildID = previousState.Server.BuildID
+					serverNeedsDownload = false
+				} else {
+					fmt.Printf("[*] Server: Build changed (%d -> %s). Updating...\n", previousState.Server.BuildID, requestedBuild)
+				}
+			}
 		} else {
 			fmt.Printf("[*] Server: %s is missing or checksum changed. Re-downloading...\n", previousState.Server.Filename)
 		}
 	} else if previousState != nil && (previousState.Server.Project != cfg.Server.Project || previousState.Server.Version != cfg.Server.Version) {
 		fmt.Printf("[*] Server: Version changed from %s %s to %s %s. Upgrading...\n",
 			previousState.Server.Project, previousState.Server.Version, cfg.Server.Project, cfg.Server.Version)
-		// Clean up old server jar
-		if previousState.Server.Filename != "" {
-			_ = os.Remove(filepath.Join(workDir, previousState.Server.Filename))
-		}
+		// Old jar is removed only after the new download succeeds (see below).
 	}
 
 	if serverNeedsDownload {
 		fmt.Printf("[*] Server: Resolving %s %s (PaperMC Fill API)...\n", cfg.Server.Project, cfg.Server.Version)
 		paperClient := resolver.NewPaperClient("", nil)
+		prevFilename := ""
+		if previousState != nil {
+			prevFilename = previousState.Server.Filename
+		}
 		serverRes, err := paperClient.ResolveAndDownload(ctx, cfg.Server, workDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[!] Fatal: Failed to resolve/download server software: %v\n", err)
@@ -214,6 +251,10 @@ func main() {
 		activeServerFilename = serverRes.Filename
 		activeServerSHA256 = serverRes.SHA256
 		activeServerBuildID = serverRes.BuildID
+		// Atomic upgrade: remove stale jar only after success and only if name changed.
+		if prevFilename != "" && prevFilename != activeServerFilename {
+			_ = os.Remove(filepath.Join(workDir, prevFilename))
+		}
 	}
 
 	// 4. Reconcile Plugins (Added, Updated, Removed, Unchanged with SHA-256)
@@ -235,18 +276,36 @@ func main() {
 
 	// B. Reconcile active plugins in tidy.toml
 	for pluginName, pCfg := range cfg.Plugins {
-		source := strings.ToLower(pCfg.Source)
+		source := strings.ToLower(strings.TrimSpace(pCfg.Source))
+		var oldPlugin *state.PluginState
+		var configChanged bool
 
 		// Check if plugin is already in state and unchanged
 		if previousState != nil {
-			oldP, exists := previousState.Plugins[pluginName]
-			if exists && oldP.Source == source {
-				versionMatch := true
-				if source == "modrinth" && oldP.Version != pCfg.Version {
-					versionMatch = false
+			if oldP, exists := previousState.Plugins[pluginName]; exists && strings.ToLower(strings.TrimSpace(oldP.Source)) == source {
+				cp := oldP
+				oldPlugin = &cp
+				switch source {
+				case "modrinth":
+					if oldP.Version != pCfg.Version {
+						configChanged = true
+					} else if oldP.ProjectID != "" && oldP.ProjectID != pCfg.ProjectID {
+						// ProjectID changed with same version string (e.g. fork swap).
+						configChanged = true
+					} else if pin := strings.TrimSpace(pCfg.SHA256); pin != "" && !strings.EqualFold(oldP.SHA256, pin) {
+						// Explicit SHA-256 pin changed.
+						configChanged = true
+					}
+				case "url":
+					// URL source has no version field: any URL or SHA change must trigger re-download.
+					if oldP.URL != "" && oldP.URL != strings.TrimSpace(pCfg.URL) {
+						configChanged = true
+					} else if !strings.EqualFold(strings.TrimSpace(oldP.SHA256), strings.TrimSpace(pCfg.SHA256)) {
+						configChanged = true
+					}
 				}
 
-				if versionMatch {
+				if !configChanged {
 					localPath := filepath.Join(workDir, "plugins", oldP.Filename)
 					// Check local file existence and SHA-256
 					if oldP.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldP.SHA256) {
@@ -254,12 +313,8 @@ func main() {
 						installedPlugins[pluginName] = oldP
 						continue
 					}
-				}
-
-				// If version changed, clean up previous jar before downloading new one
-				if !versionMatch && oldP.Filename != "" {
-					fmt.Printf("[*] Plugin [%s]: Version changed (%s -> %s). Upgrading...\n", pluginName, oldP.Version, pCfg.Version)
-					_ = os.Remove(filepath.Join(workDir, "plugins", oldP.Filename))
+				} else {
+					fmt.Printf("[*] Plugin [%s]: Configuration changed, re-downloading (keeping old jar until success)...\n", pluginName)
 				}
 			}
 		}
@@ -276,12 +331,16 @@ func main() {
 				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)
 
 			installedPlugins[pluginName] = state.PluginState{
-				Source:   "modrinth",
-				Filename: res.Filename,
-				Version:  pCfg.Version,
-				HashAlgo: res.HashAlgo,
-				Hash:     res.Hash,
-				SHA256:   res.SHA256,
+				Source:    "modrinth",
+				Filename:  res.Filename,
+				Version:   pCfg.Version,
+				ProjectID: pCfg.ProjectID,
+				HashAlgo:  res.HashAlgo,
+				Hash:      res.Hash,
+				SHA256:    res.SHA256,
+			}
+			if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
+				_ = os.Remove(filepath.Join(workDir, "plugins", oldPlugin.Filename))
 			}
 
 		case "url":
@@ -297,10 +356,17 @@ func main() {
 			installedPlugins[pluginName] = state.PluginState{
 				Source:   "url",
 				Filename: res.Filename,
+				URL:      strings.TrimSpace(pCfg.URL),
 				HashAlgo: "sha256",
 				Hash:     res.Hash,
 				SHA256:   res.SHA256,
 			}
+			if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
+				_ = os.Remove(filepath.Join(workDir, "plugins", oldPlugin.Filename))
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "[!] Fatal: plugin %q has unsupported source %q (supported: 'modrinth', 'url')\n", pluginName, pCfg.Source)
+			os.Exit(1)
 		}
 	}
 
@@ -355,11 +421,16 @@ func main() {
 	if previousState != nil && !previousState.InstalledAt.IsZero() {
 		installedAt = previousState.InstalledAt
 	}
+	// Preserve previous commit when this run did not sync git (skip-git / local-only).
+	effectiveCommit := currentCommit
+	if effectiveCommit == "" && previousState != nil {
+		effectiveCommit = previousState.GitCommit
+	}
 
 	currentState := &state.State{
 		InstalledAt:  installedAt,
 		LastSyncedAt: time.Now().UTC(),
-		GitCommit:    currentCommit,
+		GitCommit:    effectiveCommit,
 		Server: state.ServerState{
 			Project:  cfg.Server.Project,
 			Version:  cfg.Server.Version,

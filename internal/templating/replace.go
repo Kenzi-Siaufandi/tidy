@@ -83,10 +83,46 @@ func ProcessFile(path string) (int, []string, error) {
 }
 
 // ProcessDirectory scans the directory and processes config files.
+// If customPaths is non-empty, only files matching those glob patterns
+// (relative to rootDir, supporting ** for recursive match) are processed.
+// If empty, it falls back to walking rootDir for all supported config files.
 func ProcessDirectory(rootDir string, customPaths []string) (*ReplaceResult, error) {
 	result := &ReplaceResult{}
 
-	// If no custom paths provided, walk the rootDir and find all supported config files
+	patterns := make([]string, 0, len(customPaths))
+	for _, p := range customPaths {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			patterns = append(patterns, trimmed)
+		}
+	}
+
+	if len(patterns) == 0 {
+		return result, walkAll(rootDir, result)
+	}
+
+	seen := make(map[string]struct{})
+	for _, pat := range patterns {
+		files, err := expandPattern(rootDir, pat)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range files {
+			clean := filepath.Clean(f)
+			if _, ok := seen[clean]; ok {
+				continue
+			}
+			seen[clean] = struct{}{}
+			if err := processOneFile(rootDir, clean, result); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// walkAll preserves the legacy full-tree behavior when no custom paths are set.
+func walkAll(rootDir string, result *ReplaceResult) error {
 	err := filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -104,28 +140,196 @@ func ProcessDirectory(rootDir string, customPaths []string) (*ReplaceResult, err
 			return nil
 		}
 
-		relPath, _ := filepath.Rel(rootDir, path)
-		count, missing, procErr := ProcessFile(path)
-		if procErr != nil {
-			return procErr
-		}
-
-		result.FilesProcessed++
-		if count > 0 {
-			result.Replacements += count
-			result.ModifiedFiles = append(result.ModifiedFiles, relPath)
-		}
-
-		for _, mv := range missing {
-			fmt.Printf(" [!] Config warning: environment variable {{%s}} in %s is not set\n", mv, relPath)
-		}
-
-		return nil
+		return processOneFileByAbs(rootDir, path, result)
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("error processing templates in %q: %w", rootDir, err)
+		return fmt.Errorf("error processing templates in %q: %w", rootDir, err)
+	}
+	return nil
+}
+
+// processOneFile validates skips and applies templating to an absolute path
+// that may have come from glob expansion.
+func processOneFile(rootDir, absPath string, result *ReplaceResult) error {
+	// Resolve relative for skip checks.
+	rel, err := filepath.Rel(rootDir, absPath)
+	if err != nil {
+		return nil
+	}
+	// Never touch .git/.tidy internals even if a custom glob matches them.
+	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+		if part == ".git" || part == ".tidy" {
+			return nil
+		}
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		// Dangling glob match: ignore.
+		return nil
+	}
+	if info.IsDir() {
+		// If a pattern matched a directory, walk it for supported files.
+		return filepath.WalkDir(absPath, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				if d.Name() == ".git" || d.Name() == ".tidy" || d.Name() == "cache" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !IsSupportedConfigFile(p) {
+				return nil
+			}
+			return processOneFileByAbs(rootDir, p, result)
+		})
+	}
+	if !IsSupportedConfigFile(absPath) {
+		return nil
+	}
+	return processOneFileByAbs(rootDir, absPath, result)
+}
+
+func processOneFileByAbs(rootDir, absPath string, result *ReplaceResult) error {
+	relPath, _ := filepath.Rel(rootDir, absPath)
+	count, missing, procErr := ProcessFile(absPath)
+	if procErr != nil {
+		return procErr
 	}
 
-	return result, nil
+	result.FilesProcessed++
+	if count > 0 {
+		result.Replacements += count
+		result.ModifiedFiles = append(result.ModifiedFiles, relPath)
+	}
+
+	for _, mv := range missing {
+		fmt.Printf(" [!] Config warning: environment variable {{%s}} in %s is not set\n", mv, relPath)
+	}
+	return nil
+}
+
+// expandPattern resolves a single glob (absolute or relative to rootDir)
+// with ** support into absolute file paths.
+func expandPattern(rootDir, pattern string) ([]string, error) {
+	// Absolute pattern: use directly.
+	if filepath.IsAbs(pattern) {
+		if strings.Contains(pattern, "**") {
+			return matchDoublestarAbs(pattern)
+		}
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("invalid template pattern %q: %w", pattern, err)
+		}
+		return matches, nil
+	}
+	// Relative pattern: try Glob against joined path first (covers *, ?).
+	joined := filepath.Join(rootDir, pattern)
+	if !strings.Contains(pattern, "**") {
+		matches, err := filepath.Glob(joined)
+		if err != nil {
+			return nil, fmt.Errorf("invalid template pattern %q: %w", pattern, err)
+		}
+		return matches, nil
+	}
+	// ** pattern: walk rootDir and regex-match relative slash paths.
+	re, err := globToRegex(pattern)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	_ = filepath.WalkDir(rootDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" || d.Name() == ".tidy" || d.Name() == "cache" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(rootDir, p)
+		if err != nil {
+			return nil
+		}
+		if re.MatchString(filepath.ToSlash(rel)) {
+			out = append(out, p)
+		}
+		return nil
+	})
+	return out, nil
+}
+
+// matchDoublestarAbs handles absolute patterns containing **.
+func matchDoublestarAbs(pattern string) ([]string, error) {
+	// Walk from the longest static prefix to limit I/O.
+	prefix := pattern
+	if i := strings.Index(pattern, "**"); i >= 0 {
+		prefix = pattern[:i]
+		if j := strings.LastIndex(prefix, string(os.PathSeparator)); j >= 0 {
+			prefix = prefix[:j]
+		} else {
+			prefix = string(os.PathSeparator)
+		}
+	}
+	if prefix == "" {
+		prefix = string(os.PathSeparator)
+	}
+	re, err := globToRegex(pattern)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	_ = filepath.WalkDir(prefix, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" || d.Name() == ".tidy" || d.Name() == "cache" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if re.MatchString(filepath.ToSlash(p)) || re.MatchString(p) {
+			out = append(out, p)
+		}
+		return nil
+	})
+	return out, nil
+}
+
+// globToRegex converts a glob with *, ?, ** into a regex.
+func globToRegex(pattern string) (*regexp.Regexp, error) {
+	slashPat := filepath.ToSlash(pattern)
+	var b strings.Builder
+	b.WriteString("^")
+	for i := 0; i < len(slashPat); {
+		if strings.HasPrefix(slashPat[i:], "**/") {
+			b.WriteString("(.*/)?")
+			i += 3
+			continue
+		}
+		if strings.HasPrefix(slashPat[i:], "**") {
+			b.WriteString(".*")
+			i += 2
+			continue
+		}
+		c := slashPat[i]
+		switch c {
+		case '*':
+			b.WriteString("[^/]*")
+		case '?':
+			b.WriteString("[^/]")
+		case '.', '+', '(', ')', '|', '^', '$', '[', ']', '{', '}', '\\':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		default:
+			b.WriteByte(c)
+		}
+		i++
+	}
+	b.WriteString("$")
+	return regexp.Compile(b.String())
 }

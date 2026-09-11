@@ -145,9 +145,9 @@ func (c *ModrinthClient) ResolveAndDownload(ctx context.Context, pluginName stri
 			selectedFile.Filename, targetVer.VersionNumber)
 	}
 
-	filename := selectedFile.Filename
-	if strings.TrimSpace(filename) == "" {
-		filename = fmt.Sprintf("%s-%s.jar", pluginName, targetVer.VersionNumber)
+	filename, err := SafeFilename(selectedFile.Filename, fmt.Sprintf("%s-%s.jar", pluginName, targetVer.VersionNumber))
+	if err != nil {
+		return nil, fmt.Errorf("invalid plugin filename from Modrinth for %s: %w", pluginName, err)
 	}
 
 	targetPath := filepath.Join(workDir, "plugins", filename)

@@ -29,9 +29,13 @@ func ResolveAndDownloadURL(ctx context.Context, pluginName string, pCfg config.P
 	}
 
 	// Extract filename from URL path or fallback to <pluginName>.jar
-	filename := path.Base(u.Path)
-	if filename == "" || filename == "/" || filename == "." || !strings.HasSuffix(strings.ToLower(filename), ".jar") {
-		filename = pluginName + ".jar"
+	rawName := path.Base(u.Path)
+	if rawName == "" || rawName == "/" || rawName == "." || !strings.HasSuffix(strings.ToLower(rawName), ".jar") {
+		rawName = pluginName + ".jar"
+	}
+	filename, err := SafeFilename(rawName, pluginName+".jar")
+	if err != nil {
+		return nil, fmt.Errorf("plugin %q: invalid filename from URL: %w", pluginName, err)
 	}
 
 	targetPath := filepath.Join(workDir, "plugins", filename)
