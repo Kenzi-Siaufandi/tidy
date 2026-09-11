@@ -178,6 +178,12 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	for name := range c.Files {
+		if _, exists := c.Worlds[name]; exists {
+			return fmt.Errorf("duplicate file/world name %q: present in both [files] and [worlds]", name)
+		}
+	}
+
 	// Default template paths if none configured
 	if len(c.Templates.Paths) == 0 {
 		c.Templates.Paths = []string{
