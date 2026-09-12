@@ -69,6 +69,13 @@ func ListJars(workDir string) ([]JarInfo, error) {
 	return jars, nil
 }
 
+// Executable returns the path of the running tidy binary. Printed in the
+// doctor section so a PATH-vs-local mismatch is visible in the panel log,
+// where no interactive shell exists to run `command -v tidy`.
+func Executable() (string, error) {
+	return os.Executable()
+}
+
 // EulaStatus reports eula.txt state: "ok", "missing", or "not-accepted".
 func EulaStatus(workDir string) string {
 	data, err := os.ReadFile(filepath.Join(workDir, "eula.txt"))

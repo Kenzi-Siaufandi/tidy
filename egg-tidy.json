@@ -13,7 +13,7 @@
         "ghcr.io\/kenzi-siaufandi\/tidy:java25": "ghcr.io\/kenzi-siaufandi\/tidy:java25"
     },
     "file_denylist": [],
-    "startup": "tidy && exec java -Dname={{SERVER_IP}}:{{SERVER_PORT}} -XX:MaxRAM={{SERVER_MEMORY}}M {{FLAG}} -jar {{SERVER_JAR}}",
+    "startup": "TIDY_BIN=\"$(command -v tidy 2>/dev/null || echo ./tidy)\"; \"$TIDY_BIN\" && exec java -Dname={{SERVER_IP}}:{{SERVER_PORT}} -XX:MaxRAM={{SERVER_MEMORY}}M {{FLAG}} -jar {{SERVER_JAR}}",
     "config": {
         "files": "{\r\n    \"server.properties\": {\r\n        \"parser\": \"properties\",\r\n        \"find\": {\r\n            \"server-ip\": \"0.0.0.0\",\r\n            \"server-port\": \"{{server.build.default.port}}\"\r\n        }\r\n    }\r\n}",
         "startup": "{\r\n    \"done\": \")! For help, type \"\r\n}",

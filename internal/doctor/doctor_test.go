@@ -60,6 +60,16 @@ func TestEulaStatus(t *testing.T) {
 	}
 }
 
+func TestExecutableNonEmpty(t *testing.T) {
+	exe, err := Executable()
+	if err != nil {
+		t.Fatalf("executable failed: %v", err)
+	}
+	if exe == "" {
+		t.Fatal("expected non-empty executable path")
+	}
+}
+
 func TestJavaVersionMissingBinary(t *testing.T) {
 	if _, err := JavaVersion(t.Context(), "tidy-test-no-such-binary-xyz"); err == nil {
 		t.Fatal("expected error for missing binary, got nil")

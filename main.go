@@ -467,6 +467,11 @@ func main() {
 
 	// 8. Doctor: surface runtime facts the panel console can't inspect
 	// (no shell there, only Minecraft input), so a silent java exit is debuggable.
+	if exe, err := doctor.Executable(); err != nil {
+		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Doctor: failed to resolve tidy path: %v", err)))
+	} else {
+		fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Doctor: tidy %s (v%s)", exe, Version)))
+	}
 	if javaVer, err := doctor.JavaVersion(ctx, "java"); err != nil {
 		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Doctor: %v", err)))
 	} else {
