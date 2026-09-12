@@ -4,16 +4,16 @@
         "version": "PTDL_v2",
         "update_url": null
     },
-    "exported_at": "2026-09-12T15:03:40+07:00",
+    "exported_at": "2026-09-12T20:42:38+07:00",
     "name": "Tidy",
-    "author": "admin@luckynetwork.net",
+    "author": "admin@lumastudio.work",
     "description": null,
     "features": null,
     "docker_images": {
         "ghcr.io\/kenzi-siaufandi\/tidy:java25": "ghcr.io\/kenzi-siaufandi\/tidy:java25"
     },
     "file_denylist": [],
-    "startup": "TIDY_BIN=\"$(command -v tidy 2>/dev/null || echo ./tidy)\"; \"$TIDY_BIN\" && exec java -Dname={{SERVER_IP}}:{{SERVER_PORT}} -XX:MaxRAM={{SERVER_MEMORY}}M {{FLAG}} -jar {{SERVER_JAR}}",
+    "startup": "java -Dname={{SERVER_IP}}:{{SERVER_PORT}} -XX:MaxRAM={{SERVER_MEMORY}}M {{FLAG}} -jar {{SERVER_JAR}}",
     "config": {
         "files": "{\r\n    \"server.properties\": {\r\n        \"parser\": \"properties\",\r\n        \"find\": {\r\n            \"server-ip\": \"0.0.0.0\",\r\n            \"server-port\": \"{{server.build.default.port}}\"\r\n        }\r\n    }\r\n}",
         "startup": "{\r\n    \"done\": \")! For help, type \"\r\n}",
@@ -22,7 +22,7 @@
     },
     "scripts": {
         "installation": {
-            "script": "#!\/bin\/ash\r\n# Tidy Paper Java 25 Installation Script\r\n# Server Files Path: \/mnt\/server\r\n\r\ncd \/mnt\/server\r\n\r\necho \"===================================================\"\r\necho \" Installing Tidy\"\r\necho \"===================================================\"\r\n\r\n# Accept Minecraft EULA automatically\r\necho \"eula=true\" > eula.txt\r\n\r\n# If using a custom image where tidy is already pre-installed, nothing to download\r\nif which tidy >\/dev\/null 2>&1; then\r\n    echo \"[\u2713] Tidy is already pre-installed in the container image!\"\r\nelse\r\n    # Fallback for standard Yolks images: download static binary\r\n    apk update && apk add --no-cache curl jq git\r\n    GITHUB_REPO=\"Kenzi-Siaufandi\/tidy\"\r\n\r\n    if [ \"${TIDY_VERSION}\" = \"latest\" ] || [ -z \"${TIDY_VERSION}\" ]; then\r\n        DOWNLOAD_URL=$(curl -s \"https:\/\/api.github.com\/repos\/${GITHUB_REPO}\/releases\/latest\" |\r\n            jq -r '.assets[] | select(.name==\"tidy\") | .browser_download_url')\r\n        if [ -z \"${DOWNLOAD_URL}\" ] || [ \"${DOWNLOAD_URL}\" = \"null\" ]; then\r\n            DOWNLOAD_URL=\"https:\/\/github.com\/${GITHUB_REPO}\/releases\/latest\/download\/tidy\"\r\n        fi\r\n    else\r\n        DOWNLOAD_URL=\"https:\/\/github.com\/${GITHUB_REPO}\/releases\/download\/${TIDY_VERSION}\/tidy\"\r\n    fi\r\n\r\n    echo \"Downloading Tidy from ${DOWNLOAD_URL}...\"\r\n    curl -sSL -o tidy \"${DOWNLOAD_URL}\" || echo \"[!] Note: Please upload the tidy binary manually if release is not yet published.\"\r\n\r\n    if [ -f tidy ]; then\r\n        chmod +x tidy\r\n        echo \"[\u2713] Tidy downloaded successfully!\"\r\n    fi\r\nfi\r\n\r\necho \"===================================================\"\r\necho \" Installation Complete! \"\r\necho \"===================================================\"",
+            "script": "#!\/bin\/ash\r\n# Tidy Installation Script\r\n# Server Files Path: \/mnt\/server\r\n\r\nPROJECT=tidy\r\n\r\ncd \/mnt\/server\r\n\r\nif which tidy >\/dev\/null 2>&1; then\r\n    echo -e \"[\u2713] Tidy is already pre-installed in the container image!\"\r\nelse\r\n    # Fallback for standard Yolks images: download static binary\r\n    apk update && apk add --no-cache curl jq git\r\n    GITHUB_REPO=\"Kenzi-Siaufandi\/tidy\"\r\n\r\n    if [ \"${TIDY_VERSION}\" = \"latest\" ] || [ -z \"${TIDY_VERSION}\" ]; then\r\n        DOWNLOAD_URL=$(curl -s \"https:\/\/api.github.com\/repos\/${GITHUB_REPO}\/releases\/latest\" |\r\n            jq -r '.assets[] | select(.name==\"tidy\") | .browser_download_url')\r\n        if [ -z \"${DOWNLOAD_URL}\" ] || [ \"${DOWNLOAD_URL}\" = \"null\" ]; then\r\n            DOWNLOAD_URL=\"https:\/\/github.com\/${GITHUB_REPO}\/releases\/latest\/download\/tidy\"\r\n        fi\r\n    else\r\n        DOWNLOAD_URL=\"https:\/\/github.com\/${GITHUB_REPO}\/releases\/download\/${TIDY_VERSION}\/tidy\"\r\n    fi\r\n\r\n    echo -e \"Downloading Tidy from ${DOWNLOAD_URL}...\"\r\n    curl -sSL -o tidy \"${DOWNLOAD_URL}\" || echo -e \"[!] Note: Please upload the tidy binary manually if release is not yet published.\"\r\n\r\n    if [ -f tidy ]; then\r\n        chmod +x tidy\r\n        echo -e \"[\u2713] Tidy downloaded successfully!\"\r\n    fi\r\nfi",
             "container": "alpine:3.20",
             "entrypoint": "ash"
         }

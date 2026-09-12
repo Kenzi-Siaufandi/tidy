@@ -86,8 +86,9 @@ Import [egg-tidy-paper.json](egg-tidy-paper.json) into your Pterodactyl panel (*
 
 #### Startup Command:
 ```bash
-tidy && exec java -Dname={{SERVER_IP}}:{{SERVER_PORT}} -XX:MaxRAM={{SERVER_MEMORY}}M {{FLAG}} -jar {{SERVER_JARFILE}}
+java -Dname={{SERVER_IP}}:{{SERVER_PORT}} -XX:MaxRAM={{SERVER_MEMORY}}M {{FLAG}} -jar {{SERVER_JAR}}
 ```
+`tidy` runs automatically first via `/entrypoint-tidy.sh` — do not put `tidy &&` in Startup (stock Yolks `exec env` mangles `&&`).
 
 ### Environment Variables
 | Variable | Description |

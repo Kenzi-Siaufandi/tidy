@@ -35,12 +35,15 @@ RUN apt-get update && \
 
 # Install pre-compiled Tidy binary into system PATH
 COPY --from=builder /build/tidy /usr/local/bin/tidy
-RUN chmod +x /usr/local/bin/tidy
+COPY entrypoint-tidy.sh /entrypoint-tidy.sh
+RUN chmod +x /usr/local/bin/tidy /entrypoint-tidy.sh
 
 # Set up standard Pterodactyl container environment
 USER container
 ENV USER=container HOME=/home/container
 WORKDIR /home/container
 
-# Default startup command (can be overridden by Pterodactyl Egg startup)
-CMD ["/usr/local/bin/tidy"]
+# Auto pre-flight: run tidy, then exec $STARTUP (Egg startup stays pure java).
+# Stock Yolks `exec env ${PARSED}` mangles `&&`/`;`/`$()`, so `tidy && java`
+# in STARTUP cannot work — hence the eval-based wrapper above.
+CMD ["/bin/bash", "/entrypoint-tidy.sh"]
