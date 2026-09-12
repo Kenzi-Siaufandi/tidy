@@ -63,7 +63,6 @@ func main() {
 	if firstInstall {
 		fmt.Println(ui.Cyan("[*] Status: First install detected in container."))
 	} else {
-		fmt.Println(ui.Cyan("[*] Status: Existing installation found. Performing incremental reconciliation."))
 		previousState, err = state.LoadState(workDir)
 		if err != nil {
 			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: failed to load existing state file: %v. Proceeding as fresh sync.", err)))
@@ -162,7 +161,7 @@ func main() {
 					fmt.Printf("    [%s] %s\n", ch.Status, ch.Path)
 				}
 			} else {
-				fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] Git: Repository is up to date (commit %s)", git.ShortSHA(currentCommit))))
+				fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[=] Git: Repository is up to date (commit %s)", git.ShortSHA(currentCommit))))
 			}
 		}
 	} else if gitRepo == "" {
@@ -467,11 +466,6 @@ func main() {
 
 	// 8. Doctor: surface runtime facts the panel console can't inspect
 	// (no shell there, only Minecraft input), so a silent java exit is debuggable.
-	if exe, err := doctor.Executable(); err != nil {
-		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Doctor: failed to resolve tidy path: %v", err)))
-	} else {
-		fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Doctor: tidy %s (v%s)", exe, Version)))
-	}
 	if javaVer, err := doctor.JavaVersion(ctx, "java"); err != nil {
 		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Doctor: %v", err)))
 	} else {
@@ -479,15 +473,18 @@ func main() {
 	}
 	if jars, err := doctor.ListJars(workDir); err != nil {
 		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Doctor: failed to list jars: %v", err)))
-	} else if len(jars) == 0 {
-		fmt.Printf("%s\n", ui.Yellow("[!] Warning: Doctor: no *.jar found in workdir"))
 	} else {
+		found := false
 		for _, j := range jars {
-			if j.IsSymlink {
-				fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Doctor: jar %s -> %s (%d bytes)", j.Name, j.LinkTarget, j.Size)))
-			} else {
-				fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Doctor: jar %s (%d bytes)", j.Name, j.Size)))
+			if j.Name != activeServerFilename {
+				continue
 			}
+			found = true
+			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Doctor: jar %s (%d bytes)", j.Name, j.Size)))
+			break
+		}
+		if !found {
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Doctor: no server jar %s found in workdir", activeServerFilename)))
 		}
 	}
 	switch doctor.EulaStatus(workDir) {
