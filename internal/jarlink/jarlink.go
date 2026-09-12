@@ -10,20 +10,26 @@ import (
 	"github.com/Kenzi-Siaufandi/tidy/internal/resolver"
 )
 
-// AliasEnv is the Pterodactyl panel variable naming the jar used in
-// `java -jar {{SERVER_JARFILE}}`. Default matches egg-tidy-paper.json.
+// AliasEnv is the legacy Pterodactyl panel variable naming the jar used in
+// `java -jar {{SERVER_JARFILE}}` (egg-tidy-paper.json).
 const AliasEnv = "SERVER_JARFILE"
 
-// DefaultAlias is used when SERVER_JARFILE is unset (local runs).
+// AliasEnvCurrent is the panel variable in the active egg (egg-tidy.json),
+// whose startup is `java ... -jar {{SERVER_JAR}}`. It takes precedence.
+const AliasEnvCurrent = "SERVER_JAR"
+
+// DefaultAlias is used when neither variable is set (local runs).
 const DefaultAlias = "server.jar"
 
 // AliasFromEnv resolves the stable jar name, defaulting to server.jar.
 func AliasFromEnv(getenv func(string) string) string {
-	alias := strings.TrimSpace(getenv(AliasEnv))
-	if alias == "" {
-		return DefaultAlias
+	if alias := strings.TrimSpace(getenv(AliasEnvCurrent)); alias != "" {
+		return alias
 	}
-	return alias
+	if alias := strings.TrimSpace(getenv(AliasEnv)); alias != "" {
+		return alias
+	}
+	return DefaultAlias
 }
 
 // Sync ensures workDir/alias points at target (the Fill-resolved jar).
@@ -38,14 +44,14 @@ func Sync(workDir, target, alias string) (string, error) {
 
 	safeAlias, err := resolver.SafeArchiveName(alias)
 	if err != nil {
-		return "", fmt.Errorf("invalid %s %q: %w", AliasEnv, alias, err)
+		return "", fmt.Errorf("invalid jar alias %q: %w", alias, err)
 	}
 	aliasPath := filepath.Join(workDir, safeAlias)
 	targetPath := filepath.Join(workDir, strings.TrimSpace(target))
 
 	if st, err := os.Lstat(aliasPath); err == nil {
 		if st.IsDir() && st.Mode()&os.ModeSymlink == 0 {
-			return "", fmt.Errorf("%s %q is a directory, leaving it alone", AliasEnv, safeAlias)
+			return "", fmt.Errorf("jar alias %q is a directory, leaving it alone", safeAlias)
 		}
 		// Remove stale symlink or regular file before relinking.
 		_ = os.Remove(aliasPath)

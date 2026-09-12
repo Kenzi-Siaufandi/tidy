@@ -62,7 +62,26 @@ func TestAliasFromEnv(t *testing.T) {
 	if got := AliasFromEnv(func(string) string { return "" }); got != "server.jar" {
 		t.Fatalf("expected default server.jar, got %q", got)
 	}
-	if got := AliasFromEnv(func(string) string { return "  custom.jar " }); got != "custom.jar" {
-		t.Fatalf("expected trimmed custom.jar, got %q", got)
+	// Active egg variable (egg-tidy.json) wins over the legacy one.
+	getenv := func(k string) string {
+		switch k {
+		case "SERVER_JAR":
+			return "  current.jar "
+		case "SERVER_JARFILE":
+			return "legacy.jar"
+		}
+		return ""
+	}
+	if got := AliasFromEnv(getenv); got != "current.jar" {
+		t.Fatalf("expected current.jar precedence, got %q", got)
+	}
+	legacyOnly := func(k string) string {
+		if k == "SERVER_JARFILE" {
+			return "legacy.jar"
+		}
+		return ""
+	}
+	if got := AliasFromEnv(legacyOnly); got != "legacy.jar" {
+		t.Fatalf("expected legacy.jar fallback, got %q", got)
 	}
 }
