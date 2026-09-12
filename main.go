@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/config"
+	"github.com/Kenzi-Siaufandi/tidy/internal/doctor"
 	"github.com/Kenzi-Siaufandi/tidy/internal/git"
 	"github.com/Kenzi-Siaufandi/tidy/internal/jarlink"
 	"github.com/Kenzi-Siaufandi/tidy/internal/resolver"
@@ -462,6 +463,35 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Failed to save .tidy/state.json: %v", err)))
 	} else {
 		fmt.Println(ui.Green("[+] State: Saved updated state to .tidy/state.json"))
+	}
+
+	// 8. Doctor: surface runtime facts the panel console can't inspect
+	// (no shell there, only Minecraft input), so a silent java exit is debuggable.
+	if javaVer, err := doctor.JavaVersion(ctx, "java"); err != nil {
+		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Doctor: %v", err)))
+	} else {
+		fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Doctor: %s", javaVer)))
+	}
+	if jars, err := doctor.ListJars(workDir); err != nil {
+		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Doctor: failed to list jars: %v", err)))
+	} else if len(jars) == 0 {
+		fmt.Printf("%s\n", ui.Yellow("[!] Warning: Doctor: no *.jar found in workdir"))
+	} else {
+		for _, j := range jars {
+			if j.IsSymlink {
+				fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Doctor: jar %s -> %s (%d bytes)", j.Name, j.LinkTarget, j.Size)))
+			} else {
+				fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Doctor: jar %s (%d bytes)", j.Name, j.Size)))
+			}
+		}
+	}
+	switch doctor.EulaStatus(workDir) {
+	case "ok":
+		fmt.Printf("%s\n", ui.Cyan("[*] Doctor: eula.txt accepted"))
+	case "missing":
+		fmt.Printf("%s\n", ui.Yellow("[!] Warning: Doctor: eula.txt missing (server will exit); reinstall or add eula=true"))
+	default:
+		fmt.Printf("%s\n", ui.Yellow("[!] Warning: Doctor: eula.txt present but eula!=true (server will exit)"))
 	}
 
 	fmt.Println(ui.Bold("=================================================================="))
