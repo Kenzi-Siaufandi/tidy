@@ -15,6 +15,7 @@ import (
 	"github.com/Kenzi-Siaufandi/tidy/internal/state"
 	"github.com/Kenzi-Siaufandi/tidy/internal/storage"
 	"github.com/Kenzi-Siaufandi/tidy/internal/templating"
+	"github.com/Kenzi-Siaufandi/tidy/internal/ui"
 	"github.com/Kenzi-Siaufandi/tidy/internal/version"
 )
 
@@ -30,10 +31,15 @@ func main() {
 		gitUserFlag   = flag.String("git-user", "", "Git username (or env GIT_USER)")
 		skipGitFlag   = flag.Bool("skip-git", false, "Skip Git synchronization")
 		skipTplFlag   = flag.Bool("skip-templates", false, "Skip Mustache template variable replacement")
+		noColorFlag   = flag.Bool("no-color", false, "Disable colored output")
 		versionFlag   = flag.Bool("version", false, "Print Tidy version and exit")
 	)
 
 	flag.Parse()
+
+	if *noColorFlag {
+		ui.SetEnabled(false)
+	}
 
 	if *versionFlag {
 		fmt.Printf("Tidy v%s\n", Version)
@@ -42,23 +48,23 @@ func main() {
 
 	workDir, err := filepath.Abs(*workDirFlag)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[!] Fatal: failed to determine absolute path for workdir: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: failed to determine absolute path for workdir: %v", err)))
 		os.Exit(1)
 	}
 
-	fmt.Println("==================================================================")
+	fmt.Println(ui.Bold("=================================================================="))
 	fmt.Printf("  Tidy v%s \n", Version)
-	fmt.Println("==================================================================")
+	fmt.Println(ui.Bold("=================================================================="))
 
 	firstInstall := state.IsFirstInstall(workDir)
 	var previousState *state.State
 	if firstInstall {
-		fmt.Println("[*] Status: First install detected in container.")
+		fmt.Println(ui.Cyan("[*] Status: First install detected in container."))
 	} else {
-		fmt.Println("[*] Status: Existing installation found. Performing incremental reconciliation.")
+		fmt.Println(ui.Cyan("[*] Status: Existing installation found. Performing incremental reconciliation."))
 		previousState, err = state.LoadState(workDir)
 		if err != nil {
-			fmt.Printf("[!] Warning: failed to load existing state file: %v. Proceeding as fresh sync.\n", err)
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: failed to load existing state file: %v. Proceeding as fresh sync.", err)))
 		}
 	}
 
@@ -105,7 +111,7 @@ func main() {
 	if !*skipGitFlag && gitRepo != "" {
 		gitClient, err := git.NewClient()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[!] Fatal: %v\n", err)
+			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: %v", err)))
 			os.Exit(1)
 		}
 
@@ -121,44 +127,44 @@ func main() {
 		}
 
 		if firstInstall || !gitClient.IsGitRepo(workDir) {
-			fmt.Printf("[*] Git: Initializing clone from %s (branch: %s)...\n", git.MaskURL(gitRepo), gitBranch)
+			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Git: Initializing clone from %s (branch: %s)...", git.MaskURL(gitRepo), gitBranch)))
 			if err := gitClient.Clone(ctx, gitOpts); err != nil {
-				fmt.Fprintf(os.Stderr, "[!] Fatal: Git clone failed: %v\n", err)
+				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Git clone failed: %v", err)))
 				os.Exit(1)
 			}
 			headCommit, headErr := gitClient.GetHeadCommit(ctx, workDir)
 			if headErr != nil {
-				fmt.Fprintf(os.Stderr, "[!] Warning: failed to get HEAD commit after clone: %v\n", headErr)
+				fmt.Fprintf(os.Stderr, "%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: failed to get HEAD commit after clone: %v", headErr)))
 				currentCommit = ""
 			} else {
 				currentCommit = headCommit
 			}
-			fmt.Printf("[+] Git: Initial clone complete (HEAD: %s)\n", git.ShortSHA(currentCommit))
+			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Git: Initial clone complete (HEAD: %s)", git.ShortSHA(currentCommit))))
 		} else {
-			fmt.Printf("[*] Git: Checking for upstream updates from %s (branch: %s)...\n", git.MaskURL(gitRepo), gitBranch)
+			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Git: Checking for upstream updates from %s (branch: %s)...", git.MaskURL(gitRepo), gitBranch)))
 			pullRes, err := gitClient.Pull(ctx, gitOpts)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[!] Fatal: Git pull failed: %v\n", err)
+				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Git pull failed: %v", err)))
 				os.Exit(1)
 			}
 			currentCommit = pullRes.NewCommit
 
 			if pullRes.HasUpdates {
-				fmt.Printf("[+] Git: Pulled %d new commits (%s..%s):\n",
-					len(pullRes.Commits), git.ShortSHA(pullRes.OldCommit), git.ShortSHA(pullRes.NewCommit))
+				fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Git: Pulled %d new commits (%s..%s):",
+					len(pullRes.Commits), git.ShortSHA(pullRes.OldCommit), git.ShortSHA(pullRes.NewCommit))))
 				for _, cMsg := range pullRes.Commits {
 					fmt.Printf("    - %s\n", cMsg)
 				}
-				fmt.Printf("[*] Git: Modified files:\n")
+				fmt.Printf("%s\n", ui.Cyan("[*] Git: Modified files:"))
 				for _, ch := range pullRes.ChangedFiles {
 					fmt.Printf("    [%s] %s\n", ch.Status, ch.Path)
 				}
 			} else {
-				fmt.Printf("[=] Git: Repository is up to date (commit %s)\n", git.ShortSHA(currentCommit))
+				fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] Git: Repository is up to date (commit %s)", git.ShortSHA(currentCommit))))
 			}
 		}
 	} else if gitRepo == "" {
-		fmt.Println("[*] Git: No GIT_REPO specified; using local directory configs.")
+		fmt.Println(ui.Cyan("[*] Git: No GIT_REPO specified; using local directory configs."))
 	}
 
 	// 2. Read and Validate tidy.toml
@@ -168,14 +174,14 @@ func main() {
 	}
 
 	if _, err := os.Stat(configFile); err != nil {
-		fmt.Fprintf(os.Stderr, "[!] Fatal: Configuration file %q not found: %v\n", configFile, err)
+		fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Configuration file %q not found: %v", configFile, err)))
 		os.Exit(1)
 	}
 
-	fmt.Printf("[*] Config: Loading %s...\n", filepath.Base(configFile))
+	fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Config: Loading %s...", filepath.Base(configFile))))
 	cfg, err := config.LoadConfig(configFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[!] Fatal: Failed to load config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to load config: %v", err)))
 		os.Exit(1)
 	}
 
@@ -200,43 +206,43 @@ func main() {
 				paperCheck := resolver.NewPaperClient("", nil)
 				upstreamResp, _, fetchErr := paperCheck.FetchBuild(ctx, cfg.Server)
 				if fetchErr != nil {
-					fmt.Printf("[!] Warning: failed to check upstream build for updates, keeping local %s: %v\n", previousState.Server.Filename, fetchErr)
+					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: failed to check upstream build for updates, keeping local %s: %v", previousState.Server.Filename, fetchErr)))
 					activeServerFilename = previousState.Server.Filename
 					activeServerSHA256 = previousState.Server.SHA256
 					activeServerBuildID = previousState.Server.BuildID
 					serverNeedsDownload = false
 				} else if upstreamResp.ID == previousState.Server.BuildID && previousState.Server.BuildID != 0 {
-					fmt.Printf("[=] Server: %s is up-to-date (build #%d, SHA-256 verified, skipped download)\n", previousState.Server.Filename, previousState.Server.BuildID)
+					fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] Server: %s is up-to-date (build #%d, SHA-256 verified, skipped download)", previousState.Server.Filename, previousState.Server.BuildID)))
 					activeServerFilename = previousState.Server.Filename
 					activeServerSHA256 = previousState.Server.SHA256
 					activeServerBuildID = previousState.Server.BuildID
 					serverNeedsDownload = false
 				} else {
-					fmt.Printf("[*] Server: New upstream build #%d available (local #%d). Updating...\n", upstreamResp.ID, previousState.Server.BuildID)
+					fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: New upstream build #%d available (local #%d). Updating...", upstreamResp.ID, previousState.Server.BuildID)))
 				}
 			} else {
 				// Pinned build: skip only if stored build ID matches request.
 				if fmt.Sprintf("%d", previousState.Server.BuildID) == requestedBuild {
-					fmt.Printf("[=] Server: %s is up-to-date (SHA-256 verified, skipped download)\n", previousState.Server.Filename)
+					fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] Server: %s is up-to-date (SHA-256 verified, skipped download)", previousState.Server.Filename)))
 					activeServerFilename = previousState.Server.Filename
 					activeServerSHA256 = previousState.Server.SHA256
 					activeServerBuildID = previousState.Server.BuildID
 					serverNeedsDownload = false
 				} else {
-					fmt.Printf("[*] Server: Build changed (%d -> %s). Updating...\n", previousState.Server.BuildID, requestedBuild)
+					fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: Build changed (%d -> %s). Updating...", previousState.Server.BuildID, requestedBuild)))
 				}
 			}
 		} else {
-			fmt.Printf("[*] Server: %s is missing or checksum changed. Re-downloading...\n", previousState.Server.Filename)
+			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: %s is missing or checksum changed. Re-downloading...", previousState.Server.Filename)))
 		}
 	} else if previousState != nil && (previousState.Server.Project != cfg.Server.Project || previousState.Server.Version != cfg.Server.Version) {
-		fmt.Printf("[*] Server: Version changed from %s %s to %s %s. Upgrading...\n",
-			previousState.Server.Project, previousState.Server.Version, cfg.Server.Project, cfg.Server.Version)
+		fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: Version changed from %s %s to %s %s. Upgrading...",
+			previousState.Server.Project, previousState.Server.Version, cfg.Server.Project, cfg.Server.Version)))
 		// Old jar is removed only after the new download succeeds (see below).
 	}
 
 	if serverNeedsDownload {
-		fmt.Printf("[*] Server: Resolving %s %s (PaperMC Fill API)...\n", cfg.Server.Project, cfg.Server.Version)
+		fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: Resolving %s %s (PaperMC Fill API)...", cfg.Server.Project, cfg.Server.Version)))
 		paperClient := resolver.NewPaperClient("", nil)
 		prevFilename := ""
 		if previousState != nil {
@@ -244,11 +250,11 @@ func main() {
 		}
 		serverRes, err := paperClient.ResolveAndDownload(ctx, cfg.Server, workDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[!] Fatal: Failed to resolve/download server software: %v\n", err)
+			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to resolve/download server software: %v", err)))
 			os.Exit(1)
 		}
-		fmt.Printf("[+] Server: Downloaded %s (Build #%d, SHA256: %s, %d bytes)\n",
-			serverRes.Filename, serverRes.BuildID, serverRes.SHA256[:12]+"...", serverRes.Size)
+		fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Server: Downloaded %s (Build #%d, SHA256: %s, %d bytes)",
+			serverRes.Filename, serverRes.BuildID, serverRes.SHA256[:12]+"...", serverRes.Size)))
 		activeServerFilename = serverRes.Filename
 		activeServerSHA256 = serverRes.SHA256
 		activeServerBuildID = serverRes.BuildID
@@ -266,10 +272,10 @@ func main() {
 	if previousState != nil {
 		for oldName, oldP := range previousState.Plugins {
 			if _, stillPresent := cfg.Plugins[oldName]; !stillPresent {
-				fmt.Printf("[-] Plugin [%s]: Removed from tidy.toml. Deleting %s...\n", oldName, oldP.Filename)
+				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[-] Plugin [%s]: Removed from tidy.toml. Deleting %s...", oldName, oldP.Filename)))
 				oldPath := filepath.Join(workDir, "plugins", oldP.Filename)
 				if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
-					fmt.Printf("[!] Warning: failed to delete removed plugin %s: %v\n", oldPath, err)
+					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: failed to delete removed plugin %s: %v", oldPath, err)))
 				}
 			}
 		}
@@ -310,26 +316,26 @@ func main() {
 					localPath := filepath.Join(workDir, "plugins", oldP.Filename)
 					// Check local file existence and SHA-256
 					if oldP.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldP.SHA256) {
-						fmt.Printf("[=] Plugin [%s]: %s is up-to-date (SHA-256 verified, skipped download)\n", pluginName, oldP.Filename)
+						fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] Plugin [%s]: %s is up-to-date (SHA-256 verified, skipped download)", pluginName, oldP.Filename)))
 						installedPlugins[pluginName] = oldP
 						continue
 					}
 				} else {
-					fmt.Printf("[*] Plugin [%s]: Configuration changed, re-downloading (keeping old jar until success)...\n", pluginName)
+					fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Configuration changed, re-downloading (keeping old jar until success)...", pluginName)))
 				}
 			}
 		}
 
 		switch source {
 		case "modrinth":
-			fmt.Printf("[*] Plugin [%s]: Resolving from Modrinth (%s v%s)...\n", pluginName, pCfg.ProjectID, pCfg.Version)
+			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Resolving from Modrinth (%s v%s)...", pluginName, pCfg.ProjectID, pCfg.Version)))
 			res, err := modClient.ResolveAndDownload(ctx, pluginName, pCfg, workDir)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[!] Fatal: Failed to download plugin %q: %v\n", pluginName, err)
+				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
 				os.Exit(1)
 			}
-			fmt.Printf("[+] Plugin [%s]: Saved %s (SHA256: %s, %d bytes)\n",
-				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)
+			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Plugin [%s]: Saved %s (SHA256: %s, %d bytes)",
+				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)))
 
 			installedPlugins[pluginName] = state.PluginState{
 				Source:    "modrinth",
@@ -345,14 +351,14 @@ func main() {
 			}
 
 		case "url":
-			fmt.Printf("[*] Plugin [%s]: Downloading from direct URL with mandatory SHA-256...\n", pluginName)
+			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Downloading from direct URL with mandatory SHA-256...", pluginName)))
 			res, err := resolver.ResolveAndDownloadURL(ctx, pluginName, pCfg, workDir, nil)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[!] Fatal: Failed to download plugin %q: %v\n", pluginName, err)
+				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
 				os.Exit(1)
 			}
-			fmt.Printf("[+] Plugin [%s]: Saved %s (SHA256: %s, %d bytes)\n",
-				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)
+			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Plugin [%s]: Saved %s (SHA256: %s, %d bytes)",
+				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)))
 
 			installedPlugins[pluginName] = state.PluginState{
 				Source:   "url",
@@ -366,7 +372,7 @@ func main() {
 				_ = os.Remove(filepath.Join(workDir, "plugins", oldPlugin.Filename))
 			}
 		default:
-			fmt.Fprintf(os.Stderr, "[!] Fatal: plugin %q has unsupported source %q (supported: 'modrinth', 'url')\n", pluginName, pCfg.Source)
+			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: plugin %q has unsupported source %q (supported: 'modrinth', 'url')", pluginName, pCfg.Source)))
 			os.Exit(1)
 		}
 	}
@@ -379,19 +385,19 @@ func main() {
 		for name, fCfg := range allFiles {
 			syncRes, err := storageMgr.SyncFile(ctx, name, fCfg, workDir)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[!] Fatal: Failed to synchronize file/world %q: %v\n", name, err)
+				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to synchronize file/world %q: %v", name, err)))
 				os.Exit(1)
 			}
 
 			if syncRes.Skipped {
-				fmt.Printf("[=] World/File [%s]: %s (%s)\n", name, filepath.Base(syncRes.Path), syncRes.Reason)
+				fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] World/File [%s]: %s (%s)", name, filepath.Base(syncRes.Path), syncRes.Reason)))
 			} else {
 				if syncRes.Extracted {
-					fmt.Printf("[+] World/File [%s]: Extracted %d files to %s (SHA-256 verified)\n",
-						name, syncRes.Files, fCfg.Path)
+					fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] World/File [%s]: Extracted %d files to %s (SHA-256 verified)",
+						name, syncRes.Files, fCfg.Path)))
 				} else {
-					fmt.Printf("[+] World/File [%s]: Saved to %s (SHA-256 verified)\n",
-						name, fCfg.Path)
+					fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] World/File [%s]: Saved to %s (SHA-256 verified)",
+						name, fCfg.Path)))
 				}
 			}
 
@@ -407,13 +413,13 @@ func main() {
 
 	// 6. Template Variable Replacement (Mustache {{VAR_NAME}})
 	if !*skipTplFlag && !cfg.Templates.Disabled {
-		fmt.Println("[*] Templates: Scanning config files for {{VAR_NAME}} variable replacements...")
+		fmt.Println(ui.Cyan("[*] Templates: Scanning config files for {{VAR_NAME}} variable replacements..."))
 		tplResult, err := templating.ProcessDirectory(workDir, cfg.Templates.Paths)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[!] Warning: Template processing encountered an issue: %v\n", err)
+			fmt.Fprintf(os.Stderr, "%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Template processing encountered an issue: %v", err)))
 		} else {
-			fmt.Printf("[+] Templates: Processed %d configs with %d variable replacements across %d modified files\n",
-				tplResult.FilesProcessed, tplResult.Replacements, len(tplResult.ModifiedFiles))
+			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Templates: Processed %d configs with %d variable replacements across %d modified files",
+				tplResult.FilesProcessed, tplResult.Replacements, len(tplResult.ModifiedFiles))))
 		}
 	}
 
@@ -444,13 +450,13 @@ func main() {
 	}
 
 	if err := state.SaveState(workDir, currentState); err != nil {
-		fmt.Fprintf(os.Stderr, "[!] Warning: Failed to save .tidy/state.json: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Failed to save .tidy/state.json: %v", err)))
 	} else {
-		fmt.Println("[+] State: Saved updated state to .tidy/state.json")
+		fmt.Println(ui.Green("[+] State: Saved updated state to .tidy/state.json"))
 	}
 
-	fmt.Println("==================================================================")
-	fmt.Println("  [✓] Pre-flight orchestration completed successfully!")
+	fmt.Println(ui.Bold("=================================================================="))
+	fmt.Println(ui.Green("  [✓] Pre-flight orchestration completed successfully!"))
 	fmt.Printf("  Container is ready for Java 25 startup: java -jar %s\n", activeServerFilename)
-	fmt.Println("==================================================================")
+	fmt.Println(ui.Bold("=================================================================="))
 }

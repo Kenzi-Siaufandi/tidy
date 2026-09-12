@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/Kenzi-Siaufandi/tidy/internal/ui"
 )
 
 // MustacheVariableRegex matches {{VAR_NAME}} or {{ VAR_NAME }}.
@@ -227,7 +229,7 @@ func processOneFileByAbs(rootDir, absPath string, result *ReplaceResult) error {
 	}
 
 	for _, mv := range missing {
-		fmt.Printf(" [!] Config warning: environment variable {{%s}} in %s is not set\n", mv, relPath)
+		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf(" [!] Config warning: environment variable {{%s}} in %s is not set", mv, relPath)))
 	}
 	return nil
 }
