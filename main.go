@@ -11,6 +11,7 @@ import (
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/config"
 	"github.com/Kenzi-Siaufandi/tidy/internal/git"
+	"github.com/Kenzi-Siaufandi/tidy/internal/jarlink"
 	"github.com/Kenzi-Siaufandi/tidy/internal/resolver"
 	"github.com/Kenzi-Siaufandi/tidy/internal/state"
 	"github.com/Kenzi-Siaufandi/tidy/internal/storage"
@@ -264,6 +265,14 @@ func main() {
 		}
 	}
 
+	// Keep the panel's {{SERVER_JARFILE}} stable across Paper upgrades.
+	jarAlias := jarlink.AliasFromEnv(os.Getenv)
+	if linked, linkErr := jarlink.Sync(workDir, activeServerFilename, jarAlias); linkErr != nil {
+		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: failed to link %s -> %s: %v", jarAlias, activeServerFilename, linkErr)))
+	} else if linked != "" {
+		fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Server: Linked %s -> %s", linked, activeServerFilename)))
+	}
+
 	// 4. Reconcile Plugins (Added, Updated, Removed, Unchanged with SHA-256)
 	installedPlugins := make(map[string]state.PluginState)
 	modClient := resolver.NewModrinthClient("", "", nil)
@@ -457,6 +466,6 @@ func main() {
 
 	fmt.Println(ui.Bold("=================================================================="))
 	fmt.Println(ui.Green("  [✓] Pre-flight orchestration completed successfully!"))
-	fmt.Printf("  Container is ready for Java 25 startup: java -jar %s\n", activeServerFilename)
+	fmt.Printf("  Container is ready for Java 25 startup: java -jar %s\n", jarlink.AliasFromEnv(os.Getenv))
 	fmt.Println(ui.Bold("=================================================================="))
 }
