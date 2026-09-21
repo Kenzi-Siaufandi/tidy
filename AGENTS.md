@@ -40,3 +40,10 @@ Single static Go CLI (`main.go` only entrypoint). Flow: git sync → load `tidy.
 
 - `.gitignore`: `tidy` binary, `*.jar`, `*.tidy-tmp`, `plugins/`, `logs/`, `world/`, `cache/`, `.tidy/`, `.env*`, `test-workspace/`. Don't commit server artifacts or state.
 - Docker: multi-stage `golang:1.27.1-alpine` → `ghcr.io/pterodactyl/yolks:java_25`. CI (`.github/workflows/docker.yml`) pushes `ghcr.io/<repo>:java25` on `main` push / `v*` tags. Startup: `tidy && exec java ...` (see `egg-tidy-paper.json`, panel-managed — don't hand-edit).
+
+## Commits
+
+- Atomic: one logical change per commit (code + its tests/docs); split unrelated changes.
+- Conventional Commits: `type(scope): subject` — lowercase, imperative, no period, ≤72 chars.
+- Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`.
+- Examples: `feat(modrinth): track latest release per game version`, `fix(resolver): enforce game_version on pins`.
