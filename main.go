@@ -295,6 +295,9 @@ func main() {
 		source := strings.ToLower(strings.TrimSpace(pCfg.Source))
 		var oldPlugin *state.PluginState
 		var configChanged bool
+		// "latest" plugins always resolve upstream below (even when config is
+		// unchanged) to detect new releases; pins can skip via local SHA.
+		isLatest := source == "modrinth" && pCfg.IsLatest()
 
 		// Check if plugin is already in state and unchanged
 		if previousState != nil {
@@ -303,10 +306,24 @@ func main() {
 				oldPlugin = &cp
 				switch source {
 				case "modrinth":
-					if oldP.Version != pCfg.Version {
+					oldLoader := strings.ToLower(strings.TrimSpace(oldP.Loader))
+					if oldLoader == "" {
+						oldLoader = config.DefaultModrinthLoader
+					}
+					oldChannel := strings.ToLower(strings.TrimSpace(oldP.Channel))
+					if oldChannel == "" {
+						oldChannel = config.DefaultModrinthChannel
+					}
+					if oldP.Version != pCfg.NormalizedVersion() {
 						configChanged = true
-					} else if oldP.ProjectID != "" && oldP.ProjectID != pCfg.ProjectID {
+					} else if oldP.ProjectID != "" && oldP.ProjectID != strings.TrimSpace(pCfg.ProjectID) {
 						// ProjectID changed with same version string (e.g. fork swap).
+						configChanged = true
+					} else if oldP.GameVersion != pCfg.NormalizedGameVersion() {
+						configChanged = true
+					} else if oldLoader != pCfg.NormalizedLoader() {
+						configChanged = true
+					} else if oldChannel != pCfg.NormalizedChannel() {
 						configChanged = true
 					} else if pin := strings.TrimSpace(pCfg.SHA256); pin != "" && !strings.EqualFold(oldP.SHA256, pin) {
 						// Explicit SHA-256 pin changed.
@@ -321,7 +338,7 @@ func main() {
 					}
 				}
 
-				if !configChanged {
+				if !configChanged && !isLatest {
 					localPath := filepath.Join(workDir, "plugins", oldP.Filename)
 					// Check local file existence and SHA-256
 					if oldP.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldP.SHA256) {
@@ -329,35 +346,86 @@ func main() {
 						installedPlugins[pluginName] = oldP
 						continue
 					}
-				} else {
+				} else if configChanged {
 					fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Configuration changed, re-downloading (keeping old jar until success)...", pluginName)))
 				}
+				// NOTE: "latest" with unchanged config falls through to resolve
+				// upstream and update only when a new release exists.
 			}
 		}
 
 		switch source {
 		case "modrinth":
-			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Resolving from Modrinth (%s v%s)...", pluginName, pCfg.ProjectID, pCfg.Version)))
+			descriptor := fmt.Sprintf("%s v%s", pCfg.ProjectID, pCfg.NormalizedVersion())
+			if isLatest {
+				if gv := pCfg.NormalizedGameVersion(); gv != "" {
+					descriptor = fmt.Sprintf("%s latest for MC %s (loader %s)", pCfg.ProjectID, gv, pCfg.NormalizedLoader())
+				} else {
+					descriptor = fmt.Sprintf("%s latest (loader %s)", pCfg.ProjectID, pCfg.NormalizedLoader())
+				}
+			}
+			storeModrinth := func(res *resolver.PluginDownloadResult) {
+				installedPlugins[pluginName] = state.PluginState{
+					Source:          "modrinth",
+					Filename:        res.Filename,
+					Version:         pCfg.NormalizedVersion(),
+					VersionID:       res.VersionID,
+					ResolvedVersion: res.VersionNumber,
+					GameVersion:     res.GameVersion,
+					Loader:          res.Loader,
+					Channel:         pCfg.NormalizedChannel(),
+					ProjectID:       strings.TrimSpace(pCfg.ProjectID),
+					HashAlgo:        res.HashAlgo,
+					Hash:            res.Hash,
+					SHA256:          res.SHA256,
+				}
+				if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
+					_ = os.Remove(filepath.Join(workDir, "plugins", oldPlugin.Filename))
+				}
+			}
+
+			// Fast path for "latest": resolve metadata first and skip the
+			// download when the upstream version ID matches state and the
+			// local jar still verifies.
+			if isLatest && !configChanged && oldPlugin != nil && strings.TrimSpace(oldPlugin.VersionID) != "" {
+				fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Checking for updates from Modrinth (%s)...", pluginName, descriptor)))
+				ver, file, resolveErr := modClient.Resolve(ctx, pCfg)
+				if resolveErr != nil {
+					fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to resolve plugin %q: %v", pluginName, resolveErr)))
+					os.Exit(1)
+				}
+				if ver.ID == oldPlugin.VersionID {
+					localPath := filepath.Join(workDir, "plugins", oldPlugin.Filename)
+					if oldPlugin.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldPlugin.SHA256) {
+						fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] Plugin [%s]: %s is up-to-date (latest %s verified, skipped download)", pluginName, oldPlugin.Filename, ver.VersionNumber)))
+						installedPlugins[pluginName] = *oldPlugin
+						continue
+					}
+				} else {
+					fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: New upstream release %s available (local %s). Updating...",
+						pluginName, ver.VersionNumber, oldPlugin.ResolvedVersion)))
+				}
+				res, err := modClient.Download(ctx, pluginName, pCfg, workDir, ver, file)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
+					os.Exit(1)
+				}
+				fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Plugin [%s]: Saved %s (%s, SHA256: %s, %d bytes)",
+					pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
+				storeModrinth(res)
+				continue
+			}
+
+			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Resolving from Modrinth (%s)...", pluginName, descriptor)))
 			res, err := modClient.ResolveAndDownload(ctx, pluginName, pCfg, workDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
 				os.Exit(1)
 			}
-			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Plugin [%s]: Saved %s (SHA256: %s, %d bytes)",
-				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)))
+			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Plugin [%s]: Saved %s (%s, SHA256: %s, %d bytes)",
+				pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
 
-			installedPlugins[pluginName] = state.PluginState{
-				Source:    "modrinth",
-				Filename:  res.Filename,
-				Version:   pCfg.Version,
-				ProjectID: pCfg.ProjectID,
-				HashAlgo:  res.HashAlgo,
-				Hash:      res.Hash,
-				SHA256:    res.SHA256,
-			}
-			if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
-				_ = os.Remove(filepath.Join(workDir, "plugins", oldPlugin.Filename))
-			}
+			storeModrinth(res)
 
 		case "url":
 			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Downloading from direct URL with mandatory SHA-256...", pluginName)))

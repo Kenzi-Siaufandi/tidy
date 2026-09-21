@@ -211,7 +211,7 @@ version = "1.0.0"
 `,
 		},
 		{
-			name: "modrinth missing version",
+			name: "modrinth invalid channel",
 			raw: `
 [server]
 project = "paper"
@@ -220,6 +220,22 @@ version = "26.2"
 [plugins.Test]
 source = "modrinth"
 project_id = "test"
+version = "latest"
+channel = "snapshot"
+`,
+		},
+		{
+			name: "url with game_version",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "url"
+url = "https://example.com/test.jar"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+game_version = "1.21.1"
 `,
 		},
 		{
@@ -267,5 +283,67 @@ source = "spiget"
 				t.Errorf("expected error for %s, got nil", tt.name)
 			}
 		})
+	}
+}
+
+func TestParseConfig_ModrinthDefaults(t *testing.T) {
+	raw := `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "modrinth"
+project_id = "test"
+`
+	cfg, err := ParseConfig([]byte(raw))
+	if err != nil {
+		t.Fatalf("expected valid config, got error: %v", err)
+	}
+	p := cfg.Plugins["Test"]
+	if p.Version != "latest" {
+		t.Errorf("expected default version 'latest', got %q", p.Version)
+	}
+	if p.Loader != "paper" {
+		t.Errorf("expected default loader 'paper', got %q", p.Loader)
+	}
+	if p.Channel != "release" {
+		t.Errorf("expected default channel 'release', got %q", p.Channel)
+	}
+	if !p.IsLatest() {
+		t.Errorf("expected IsLatest() to be true for omitted version")
+	}
+}
+
+func TestParseConfig_ModrinthNormalization(t *testing.T) {
+	raw := `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "modrinth"
+project_id = "test"
+version = "LATEST"
+game_version = "1.21.1"
+loader = "PAPER"
+channel = "BETA"
+`
+	cfg, err := ParseConfig([]byte(raw))
+	if err != nil {
+		t.Fatalf("expected valid config, got error: %v", err)
+	}
+	p := cfg.Plugins["Test"]
+	if p.Version != "latest" {
+		t.Errorf("expected normalized version 'latest', got %q", p.Version)
+	}
+	if p.Loader != "paper" {
+		t.Errorf("expected normalized loader 'paper', got %q", p.Loader)
+	}
+	if p.Channel != "beta" {
+		t.Errorf("expected normalized channel 'beta', got %q", p.Channel)
+	}
+	if p.GameVersion != "1.21.1" {
+		t.Errorf("expected game_version '1.21.1', got %q", p.GameVersion)
 	}
 }

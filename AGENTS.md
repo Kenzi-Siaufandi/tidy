@@ -22,7 +22,7 @@ Single static Go CLI (`main.go` only entrypoint). Flow: git sync → load `tidy.
 ## Config gotchas (`internal/config/config.go:Validate`)
 
 - `[server]`: `url` is rejected; must use `project` + `version`. `build` defaults to `"latest"`.
-- `plugins.<name>`: only `modrinth` (`project_id` + `version` required, `sha256` optional pin) or `url` (`url` + mandatory 64-char hex `sha256`).
+- `plugins.<name>`: only `modrinth` (`project_id` required; `version` exact pin or `"latest"`, defaults to `"latest"`; optional `game_version` MC filter, `loader` defaults to `"paper"`, `channel` defaults to `"release"`, `sha256` optional pin — omit with `"latest"`) or `url` (`url` + mandatory 64-char hex `sha256`; rejects `game_version`/`loader`/`channel`).
 - `files.<name>` / `worlds.<name>`: `path` + `url` + mandatory 64-char hex `sha256`. `source` accepts `http`/`https`/`url`/empty. Same name in both sections is an error.
 - `FileConfig.Once` defaults to `true` when unset — `once=true` skips download if dest exists **without verifying hash** and records empty SHA in state.
 - `extract=true` requires directory `path`; `extract=false` with dir `path` + `once=false` errors.
@@ -34,7 +34,7 @@ Single static Go CLI (`main.go` only entrypoint). Flow: git sync → load `tidy.
 - Idempotency: server/plugins skip download only if local file exists **and** SHA-256 verifies against state; stale server jar deleted only after new download succeeds. Removed plugins (in state, absent from config) are deleted from `plugins/`.
 - Templates: missing env var leaves `{{VAR}}` in place + prints warning, not fatal. Writes are atomic (temp file + rename, preserves mode).
 - Storage: `extract` downloads to `.tidy/<name>.archive.tmp`, extracts, deletes tmp, then removes stale `session.lock` under dest.
-- Modrinth: requires `User-Agent` (default from `version.Version`, override via `MODRINTH_USER_AGENT`); picks `primary` file, prefers `sha512` > `sha256` > `sha1`, then always computes local SHA-256 and enforces `sha256` pin if set.
+- Modrinth: requires `User-Agent` (default from `version.Version`, override via `MODRINTH_USER_AGENT`); picks `primary` file, prefers `sha512` > `sha256` > `sha1`, then always computes local SHA-256 and enforces `sha256` pin if set. Pinned `version` resolves via direct endpoint with list-scan fallback and enforces `game_version` when set (loader not enforced: bukkit jars run on paper); `version="latest"` (default) uses server-side `game_versions`/`loaders` filters + `channel` policy and errors when nothing matches. Latest update checks compare resolved version ID in state, not the `"latest"` string.
 
 ## Artifacts / CI
 

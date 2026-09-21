@@ -29,11 +29,56 @@ type ServerConfig struct {
 
 // PluginConfig defines an individual plugin dependency.
 type PluginConfig struct {
-	Source    string `toml:"source"`     // "modrinth" or "url"
-	ProjectID string `toml:"project_id"` // required for modrinth
-	Version   string `toml:"version"`    // required for modrinth
-	URL       string `toml:"url"`        // required for url
-	SHA256    string `toml:"sha256"`     // mandatory for url, optional for modrinth
+	Source      string `toml:"source"`       // "modrinth" or "url"
+	ProjectID   string `toml:"project_id"`   // required for modrinth
+	Version     string `toml:"version"`      // modrinth plugin version pin, or "latest" (default)
+	GameVersion string `toml:"game_version"` // modrinth Minecraft version filter, e.g. "1.21.1"
+	Loader      string `toml:"loader"`       // modrinth loader filter, defaults to "paper"
+	Channel     string `toml:"channel"`      // "release" (default), "beta" (+beta), "alpha" (all)
+	URL         string `toml:"url"`          // required for url
+	SHA256      string `toml:"sha256"`       // mandatory for url, optional for modrinth
+}
+
+// DefaultModrinthLoader is used when a modrinth plugin omits 'loader'.
+const DefaultModrinthLoader = "paper"
+
+// DefaultModrinthChannel is used when a modrinth plugin omits 'channel'.
+const DefaultModrinthChannel = "release"
+
+// IsLatest reports whether the plugin tracks the newest compatible Modrinth
+// version instead of a pinned version number or version ID.
+func (p PluginConfig) IsLatest() bool {
+	v := strings.TrimSpace(p.Version)
+	return v == "" || strings.EqualFold(v, "latest")
+}
+
+// NormalizedVersion returns the effective version selector ("latest" when unset).
+func (p PluginConfig) NormalizedVersion() string {
+	if p.IsLatest() {
+		return "latest"
+	}
+	return strings.TrimSpace(p.Version)
+}
+
+// NormalizedLoader returns the effective loader filter (defaults to "paper").
+func (p PluginConfig) NormalizedLoader() string {
+	if l := strings.ToLower(strings.TrimSpace(p.Loader)); l != "" {
+		return l
+	}
+	return DefaultModrinthLoader
+}
+
+// NormalizedChannel returns the effective release channel (defaults to "release").
+func (p PluginConfig) NormalizedChannel() string {
+	if ch := strings.ToLower(strings.TrimSpace(p.Channel)); ch != "" {
+		return ch
+	}
+	return DefaultModrinthChannel
+}
+
+// NormalizedGameVersion returns the trimmed Minecraft version filter ("", if unset).
+func (p PluginConfig) NormalizedGameVersion() string {
+	return strings.TrimSpace(p.GameVersion)
 }
 
 // FileConfig defines a large file or world asset download.
@@ -122,17 +167,37 @@ func (c *Config) Validate() error {
 			if strings.TrimSpace(p.ProjectID) == "" {
 				return fmt.Errorf("plugin %q: modrinth source requires 'project_id'", name)
 			}
-			if strings.TrimSpace(p.Version) == "" {
-				return fmt.Errorf("plugin %q: modrinth source requires 'version'", name)
+			// 'version' is optional and defaults to "latest" (track newest
+			// compatible release). Apply defaults so downstream code and
+			// state comparisons see normalized values.
+			if p.IsLatest() {
+				p.Version = "latest"
+			} else {
+				p.Version = strings.TrimSpace(p.Version)
+			}
+			p.GameVersion = strings.TrimSpace(p.GameVersion)
+			p.Loader = p.NormalizedLoader()
+			p.Channel = p.NormalizedChannel()
+			switch p.Channel {
+			case "release", "beta", "alpha":
+			default:
+				return fmt.Errorf("plugin %q: invalid 'channel' %q (supported: 'release', 'beta', 'alpha')", name, p.Channel)
 			}
 			if sha := strings.TrimSpace(p.SHA256); sha != "" {
 				if err := validateSHA256Hex(sha); err != nil {
 					return fmt.Errorf("plugin %q: invalid 'sha256': %w", name, err)
 				}
+				// Note: combining 'sha256' with version="latest" freezes the
+				// jar, so a future upstream release fails verification by
+				// design. Users tracking 'latest' should normally omit it.
 			}
+			c.Plugins[name] = p
 		case "url":
 			if strings.TrimSpace(p.URL) == "" {
 				return fmt.Errorf("plugin %q: url source requires 'url'", name)
+			}
+			if strings.TrimSpace(p.GameVersion) != "" || strings.TrimSpace(p.Loader) != "" || strings.TrimSpace(p.Channel) != "" {
+				return fmt.Errorf("plugin %q: 'game_version'/'loader'/'channel' only apply to modrinth source", name)
 			}
 			sha := strings.TrimSpace(p.SHA256)
 			if sha == "" {

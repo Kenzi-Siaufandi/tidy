@@ -42,6 +42,15 @@ source = "modrinth"
 project_id = "fastasyncworldedit"
 version = "2.11.2"
 
+# Or track the newest compatible release (errors if none supports the filter):
+# [plugins.LuckPerms]
+# source = "modrinth"
+# project_id = "luckperms"
+# version = "latest"      # default when omitted
+# game_version = "1.21.1" # Minecraft version filter
+# loader = "paper"        # defaults to "paper"
+# channel = "release"     # "release" (default) | "beta" | "alpha"
+
 [plugins.Vault]
 source = "url"
 url = "https://github.com/MilkBowl/Vault/releases/download/1.7.3/Vault.jar"

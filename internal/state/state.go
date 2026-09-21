@@ -37,14 +37,19 @@ type ServerState struct {
 
 // PluginState records installed plugin metadata and verification hashes.
 type PluginState struct {
-	Source    string `json:"source"`
-	Filename  string `json:"filename"`
-	Version   string `json:"version,omitempty"`
-	ProjectID string `json:"project_id,omitempty"`
-	URL       string `json:"url,omitempty"`
-	HashAlgo  string `json:"hash_algo"`
-	Hash      string `json:"hash"`
-	SHA256    string `json:"sha256,omitempty"` // always computed for local cache validation
+	Source          string `json:"source"`
+	Filename        string `json:"filename"`
+	Version         string `json:"version,omitempty"`          // configured selector ("latest" or pinned)
+	VersionID       string `json:"version_id,omitempty"`       // resolved Modrinth version ID
+	ResolvedVersion string `json:"resolved_version,omitempty"` // resolved version_number
+	GameVersion     string `json:"game_version,omitempty"`
+	Loader          string `json:"loader,omitempty"`
+	Channel         string `json:"channel,omitempty"`
+	ProjectID       string `json:"project_id,omitempty"`
+	URL             string `json:"url,omitempty"`
+	HashAlgo        string `json:"hash_algo"`
+	Hash            string `json:"hash"`
+	SHA256          string `json:"sha256,omitempty"` // always computed for local cache validation
 }
 
 // FileState records synchronized large files or world assets.

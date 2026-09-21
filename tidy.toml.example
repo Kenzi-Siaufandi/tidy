@@ -6,7 +6,19 @@ version = "26.2"
 [plugins.FastAsyncWorldEdit]
 source = "modrinth"
 project_id = "fastasyncworldedit"
-version = "2.11.2"
+version = "2.11.2" # exact version_number or version ID pin
+
+# Track the newest release supporting your Minecraft version ("latest" is the
+# default when 'version' is omitted). Errors out if no compatible release
+# exists. Optional 'sha256' pins the jar, but omit it with 'latest' so future
+# releases don't fail verification.
+[plugins.LuckPerms]
+source = "modrinth"
+project_id = "luckperms"
+version = "latest"
+game_version = "1.21.1" # Minecraft version filter (Modrinth game_versions)
+loader = "paper"        # defaults to "paper"; set "bukkit" as fallback
+channel = "release"     # "release" (default) | "beta" (+beta) | "alpha" (all)
 
 [plugins.Vault]
 source = "url"
