@@ -192,10 +192,12 @@ func main() {
 
 	ctx := context.Background()
 
-	// 3. Reconcile Server Software (PaperMC Fill API with SHA-256)
+	// 3. Reconcile Server Software (PaperMC Fill / PurpurMC API with SHA-256)
 	var activeServerFilename string
 	var activeServerSHA256 string
 	var activeServerBuildID int
+
+	serverResolver := resolver.NewServerResolver(cfg.Server.Project)
 
 	serverNeedsDownload := true
 	if previousState != nil && previousState.Server.Project == cfg.Server.Project && previousState.Server.Version == cfg.Server.Version {
@@ -208,22 +210,21 @@ func main() {
 			}
 			if strings.EqualFold(requestedBuild, "latest") {
 				// Auto-update: check upstream for a newer build.
-				paperCheck := resolver.NewPaperClient("", nil)
-				upstreamResp, _, fetchErr := paperCheck.FetchBuild(ctx, cfg.Server)
+				upstreamBuildID, fetchErr := serverResolver.FetchLatestBuildID(ctx, cfg.Server)
 				if fetchErr != nil {
 					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: failed to check upstream build for updates, keeping local %s: %v", previousState.Server.Filename, fetchErr)))
 					activeServerFilename = previousState.Server.Filename
 					activeServerSHA256 = previousState.Server.SHA256
 					activeServerBuildID = previousState.Server.BuildID
 					serverNeedsDownload = false
-				} else if upstreamResp.ID == previousState.Server.BuildID && previousState.Server.BuildID != 0 {
+				} else if upstreamBuildID == previousState.Server.BuildID && previousState.Server.BuildID != 0 {
 					fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] Server: %s is up-to-date (build #%d, SHA-256 verified, skipped download)", previousState.Server.Filename, previousState.Server.BuildID)))
 					activeServerFilename = previousState.Server.Filename
 					activeServerSHA256 = previousState.Server.SHA256
 					activeServerBuildID = previousState.Server.BuildID
 					serverNeedsDownload = false
 				} else {
-					fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: New upstream build #%d available (local #%d). Updating...", upstreamResp.ID, previousState.Server.BuildID)))
+					fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: New upstream build #%d available (local #%d). Updating...", upstreamBuildID, previousState.Server.BuildID)))
 				}
 			} else {
 				// Pinned build: skip only if stored build ID matches request.
@@ -247,13 +248,12 @@ func main() {
 	}
 
 	if serverNeedsDownload {
-		fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: Resolving %s %s (PaperMC Fill API)...", cfg.Server.Project, cfg.Server.Version)))
-		paperClient := resolver.NewPaperClient("", nil)
+		fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: Resolving %s %s (%s)...", cfg.Server.Project, cfg.Server.Version, serverResolver.Name())))
 		prevFilename := ""
 		if previousState != nil {
 			prevFilename = previousState.Server.Filename
 		}
-		serverRes, err := paperClient.ResolveAndDownload(ctx, cfg.Server, workDir)
+		serverRes, err := serverResolver.ResolveAndDownload(ctx, cfg.Server, workDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to resolve/download server software: %v", err)))
 			os.Exit(1)

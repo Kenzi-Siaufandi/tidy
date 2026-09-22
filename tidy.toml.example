@@ -1,7 +1,8 @@
 [server]
-# Enforces fill API resolution; direct 'url' is not supported here
-project = "paper"
-version = "26.2"
+# Enforces server API resolution; direct 'url' is not supported here
+project = "paper" # or "purpur" (PurpurMC API: versions look like "1.21.8")
+version = "26.2" # e.g. "1.21.8" when project = "purpur"
+# build = "latest" # default; or pin a numeric build like "123" ("2497" for purpur)
 
 [plugins.FastAsyncWorldEdit]
 source = "modrinth"

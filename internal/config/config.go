@@ -147,10 +147,10 @@ func (c *Config) GetAllFiles() map[string]FileConfig {
 func (c *Config) Validate() error {
 	// Validate Server
 	if strings.TrimSpace(c.Server.URL) != "" {
-		return errors.New("invalid [server] configuration: direct 'url' is not supported; use project and version for PaperMC Fill API resolution")
+		return errors.New("invalid [server] configuration: direct 'url' is not supported; use 'project' and 'version' for server API resolution (PaperMC Fill or PurpurMC)")
 	}
 	if strings.TrimSpace(c.Server.Project) == "" {
-		return errors.New("invalid [server] configuration: 'project' is required (e.g. 'paper')")
+		return errors.New("invalid [server] configuration: 'project' is required (e.g. 'paper' or 'purpur')")
 	}
 	if strings.TrimSpace(c.Server.Version) == "" {
 		return errors.New("invalid [server] configuration: 'version' is required (e.g. '26.2')")

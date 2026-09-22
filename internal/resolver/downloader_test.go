@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
@@ -110,5 +111,46 @@ func TestDownloadAndVerify_HTTPError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error on HTTP 404, got nil")
+	}
+}
+
+func TestDownloadAndVerify_MD5(t *testing.T) {
+	content := []byte("legacy api jar payload bytes")
+	sum := md5.Sum(content)
+	expectedHash := hex.EncodeToString(sum[:])
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(content)
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "server.jar")
+
+	res, err := DownloadAndVerify(context.Background(), DownloadOptions{
+		URL:           server.URL + "/server.jar",
+		TargetPath:    targetPath,
+		ExpectedHash:  expectedHash,
+		HashAlgorithm: "md5",
+		Client:        server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("md5 download failed: %v", err)
+	}
+	if res.ComputedHash != expectedHash {
+		t.Errorf("expected hash %s, got %s", expectedHash, res.ComputedHash)
+	}
+
+	// Mismatched md5 must fail and clean up the temp file.
+	_, err = DownloadAndVerify(context.Background(), DownloadOptions{
+		URL:           server.URL + "/server.jar",
+		TargetPath:    filepath.Join(tmpDir, "bad.jar"),
+		ExpectedHash:  "00000000000000000000000000000000",
+		HashAlgorithm: "md5",
+		Client:        server.Client(),
+	})
+	if err == nil {
+		t.Fatal("expected error on md5 mismatch, got nil")
 	}
 }

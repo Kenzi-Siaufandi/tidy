@@ -17,6 +17,7 @@ Tidy synchronizes declarative server configurations from Git, reconciles changes
   - Strict SHA-256 checksum enforcement across all server builds, plugin downloads, worlds, and large files.
   - On restart, verifies existing local files against expected SHA-256 hashes to skip redundant downloads.
 - **PaperMC Fill API Resolution**: Resolves Paper builds (e.g. Paper `26.2`), downloads the upstream jar into the root directory, and strictly verifies SHA-256 checksums. Direct `url` is disallowed under `[server]`.
+- **PurpurMC API Resolution**: `project = "purpur"` (e.g. version `1.21.8`) resolves via `api.purpurmc.org`, verifies the upstream MD5, records local SHA-256 in state, and refuses non-`success` builds.
 - **Modrinth API Resolution**: Fetches plugins via Modrinth v2 API with a compliant `User-Agent: Kenzi-Siaufandi/tidy/0.2.1 (https://github.com/Kenzi-Siaufandi/tidy)` header, places jars into `./plugins/`, and verifies hashes.
 - **Large Files & World Management (`[files.<name>]` / `[worlds.<name>]`)**:
   - Direct HTTPS streaming downloads with mandatory SHA-256 checksums.

@@ -13,7 +13,7 @@ Single static Go CLI (`main.go` only entrypoint). Flow: git sync → load `tidy.
 
 - `internal/config/` — `tidy.toml` parse + `Validate()`. `tidy.toml.example` is the reference.
 - `internal/git/` — requires system `git` binary; shallow `--depth 1` only.
-- `internal/resolver/` — PaperMC Fill, Modrinth v2, generic `DownloadAndVerify`, `SafeFilename`/`SafeArchiveName` traversal guards.
+- `internal/resolver/` — PaperMC Fill, PurpurMC (`project = "purpur"`), Modrinth v2, generic `DownloadAndVerify` (sha256/sha512/sha1/md5), `SafeFilename`/`SafeArchiveName` traversal guards.
 - `internal/storage/` — `[files.*]`/`[worlds.*]` sync + stdlib-only extract (`.zip`, `.tar.gz`, `.tgz`, `.tar`).
 - `internal/templating/` — `{{VAR}}` replacement.
 - `internal/state/` — `.tidy/state.json` tracking; `IsFirstInstall` = file missing.
@@ -21,7 +21,7 @@ Single static Go CLI (`main.go` only entrypoint). Flow: git sync → load `tidy.
 
 ## Config gotchas (`internal/config/config.go:Validate`)
 
-- `[server]`: `url` is rejected; must use `project` + `version`. `build` defaults to `"latest"`.
+- `[server]`: `url` is rejected; must use `project` + `version`. `build` defaults to `"latest"`. `project = "purpur"` routes to PurpurMC API (MD5-verified upstream, SHA-256 hashed locally; non-`success` builds refused); anything else uses PaperMC Fill.
 - `plugins.<name>`: only `modrinth` (`project_id` required; `version` exact pin or `"latest"`, defaults to `"latest"`; optional `game_version` MC filter, `loader` defaults to `"paper"`, `channel` defaults to `"release"`, `sha256` optional pin — omit with `"latest"`) or `url` (`url` + mandatory 64-char hex `sha256`; rejects `game_version`/`loader`/`channel`).
 - `files.<name>` / `worlds.<name>`: `path` + `url` + mandatory 64-char hex `sha256`. `source` accepts `http`/`https`/`url`/empty. Same name in both sections is an error.
 - `FileConfig.Once` defaults to `true` when unset — `once=true` skips download if dest exists **without verifying hash** and records empty SHA in state.

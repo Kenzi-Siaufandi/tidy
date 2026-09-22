@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -22,7 +23,7 @@ type DownloadOptions struct {
 	URL           string
 	TargetPath    string
 	ExpectedHash  string
-	HashAlgorithm string // "sha256", "sha512", "sha1"
+	HashAlgorithm string // "sha256", "sha512", "sha1", "md5"
 	Headers       map[string]string
 	Client        *http.Client
 }
@@ -56,8 +57,12 @@ func DownloadAndVerify(ctx context.Context, opts DownloadOptions) (*DownloadResu
 		hasher = sha512.New()
 	case "sha1":
 		hasher = sha1.New()
+	case "md5":
+		// Legacy APIs (e.g. PurpurMC) publish only MD5. Verified upstream,
+		// then re-hashed locally as SHA-256 for state tracking.
+		hasher = md5.New()
 	default:
-		return nil, fmt.Errorf("unsupported hash algorithm %q (supported: sha256, sha512, sha1)", opts.HashAlgorithm)
+		return nil, fmt.Errorf("unsupported hash algorithm %q (supported: sha256, sha512, sha1, md5)", opts.HashAlgorithm)
 	}
 
 	client := opts.Client
