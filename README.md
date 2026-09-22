@@ -1,34 +1,11 @@
 # Tidy
 
-A tiny, lightweight, zero-dependency Go CLI designed to act as a **pre-flight container orchestrator** inside Pterodactyl Minecraft server containers (targeting Java 25 runtimes).
+> [!WARNING]
+> **Notice**: This is a **vibe coded** project and is only meant to be used for convenience. Use at your own discretion.
 
-Tidy synchronizes declarative server configurations from Git, reconciles changes across container restarts, resolves and downloads server software via PaperMC Fill API, resolves and downloads plugins via Modrinth and direct URLs with universal SHA-256 cryptographic verification, acquires large files and worlds over direct HTTPS with stream archive extraction, and performs mustache-style `{{VAR_NAME}}` environment variable substitutions for database and plugin setups before the server launches.
+A tiny, lightweight, zero-dependency Go CLI that acts as a **pre-flight container orchestrator** for Minecraft servers.
 
----
-
-## Features
-
-- **Zero Runtime Dependencies**: Compiles to a single static binary (`CGO_ENABLED=0`, stripped, ~7MB) with no external system dependencies.
-- **Git Config Synchronization & Incremental Pull**:
-  - Shallow-clones declarative configs on first install.
-  - Automatically resets working tree credential changes before pulling on restart, guaranteeing clean, conflict-free `git pull`.
-  - Reports incoming commits (`git log`) and modified files (`[M]`, `[A]`, `[D]`).
-- **Universal SHA-256 Verification**:
-  - Strict SHA-256 checksum enforcement across all server builds, plugin downloads, worlds, and large files.
-  - On restart, verifies existing local files against expected SHA-256 hashes to skip redundant downloads.
-- **PaperMC Fill API Resolution**: Resolves Paper builds (e.g. Paper `26.2`), downloads the upstream jar into the root directory, and strictly verifies SHA-256 checksums. Direct `url` is disallowed under `[server]`.
-- **PurpurMC API Resolution**: `project = "purpur"` (e.g. version `1.21.8`) resolves via `api.purpurmc.org`, verifies the upstream MD5, records local SHA-256 in state, and refuses non-`success` builds.
-- **Modrinth API Resolution**: Fetches plugins via Modrinth v2 API with a compliant `User-Agent: Kenzi-Siaufandi/tidy/0.2.1 (https://github.com/Kenzi-Siaufandi/tidy)` header, places jars into `./plugins/`, and verifies hashes.
-- **Local Plugins (`source = "local"`)**: Verifies manually-uploaded jars at `path` against a mandatory `sha256` every run; nothing is downloaded, a missing or tampered jar is fatal.
-- **Large Files & World Management (`[files.<name>]` / `[worlds.<name>]`)**:
-  - Direct HTTPS streaming downloads with mandatory SHA-256 checksums.
-  - Destination `path` directory parameter (e.g. `path = "world"`, `path = "world_nether"`).
-  - Stream archive extraction (`extract = true`) for `.zip`, `.tar.gz`, `.tgz`, and `.tar` using Go standard library.
-  - **Player data protection (`once = true` by default)**: Only downloads if the target directory does not exist, protecting player survival progress from being wiped on container restart.
-  - Automatically detects and removes stale `session.lock` files left over from unclean container terminations.
-- **Mustache Config Templating**: Scans `.yml`, `.yaml`, `.properties`, `.json`, `.conf`, `.toml`, `.txt`, `.cfg`, `.env` files and replaces `{{VAR_NAME}}` placeholders with container environment variables (e.g. `{{DB_HOST}}`, `{{DB_PASSWORD}}`). Skips `.git`, `.tidy`, and `cache` directories. Honors `[templates] paths` globs when set.
-- **State Tracking**: Writes `.tidy/state.json` recording installed artifacts, commit SHAs, and SHA-256 hashes across container boots.
-- **Setup Helper (`tidy setup`)**: Zero-dependency Git onboarding ported from `tidy-git.py` — no Python needed. `init` writes an optimized `.gitignore`/`.gitattributes`, `status` lists trackable configs vs ignored worlds/JARs/databases, `check` audits for forbidden tracked files (report-only; suggests `git rm --cached` fixes).
+Tidy reads your `tidy.toml`, downloads the server jar, plugins, worlds, and other files you declared, fills in config values from environment variables, and gets everything ready before the server starts.
 
 ---
 
@@ -60,8 +37,8 @@ tidy setup pack-world --world world_nether --output nether.zip --format zip
 ### Creating tidy.toml
 
 `new` is an interactive wizard: asks for the server (project/version/build),
-then loops over plugins (modrinth or url, Enter skips/finishes). Output is
-validated before writing and never overwrites without `--force`.
+then loops over plugins (modrinth, url, or local; Enter skips/finishes).
+Output is validated before writing and never overwrites without `--force`.
 
 ```bash
 tidy setup new --workdir /path/to/server
@@ -121,41 +98,6 @@ once = true
 
 ---
 
----
-
-## Pterodactyl Deployment & Docker Image
-
-### Official Pre-Baked Docker Image
-A lightweight, production-ready container image targeting Java 25 is published directly to GitHub Container Registry (GHCR):
-
-```text
-ghcr.io/kenzi-siaufandi/tidy:java25
-```
-
-- **Pre-installed**: Java 25, Git, CA Certificates, Curl, and Tidy (`/usr/local/bin/tidy`).
-- **Instant Boot**: Zero install delays; no network calls to fetch binaries during container boot.
-- **CI/CD**: Automatically built and published on every commit via GitHub Actions.
-
-### Pterodactyl Custom Egg (`egg-tidy-paper.json`)
-Import [egg-tidy-paper.json](egg-tidy-paper.json) into your Pterodactyl panel (**Admin -> Nests -> Minecraft -> Import Egg**).
-
-#### Startup Command:
-```bash
-java -Dname={{SERVER_IP}}:{{SERVER_PORT}} -XX:MaxRAM={{SERVER_MEMORY}}M {{FLAG}} -jar {{SERVER_JAR}}
-```
-`tidy` runs automatically first via `/entrypoint-tidy.sh` — do not put `tidy &&` in Startup (stock Yolks `exec env` mangles `&&`).
-
-### Environment Variables
-| Variable | Description |
-|---|---|
-| `GIT_REPO` / `TIDY_GIT_REPO` | Git repository containing declarative server configs |
-| `GIT_BRANCH` / `TIDY_GIT_BRANCH` | Git branch (default: `main`) |
-| `GIT_TOKEN` / `GITHUB_TOKEN` | Authentication token for private Git repositories |
-| `DB_HOST`, `DB_USER`, `DB_PASSWORD`, ... | Environment variables substituted into `{{VAR_NAME}}` |
-| `MODRINTH_USER_AGENT` | Custom User-Agent override for Modrinth API |
-
----
-
 ## Building from Source
 
 ```bash
@@ -165,9 +107,3 @@ make test
 # Build static binary
 make build
 ```
-
----
-
-> [!WARNING]
-> **Notice**: This is a **vibe coded** project and is only meant to be used for convenience. Use at your own discretion.
-
