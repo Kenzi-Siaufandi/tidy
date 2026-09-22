@@ -81,3 +81,60 @@ func TestPaperClient_ResolveAndDownload(t *testing.T) {
 		t.Errorf("downloaded content does not match expected")
 	}
 }
+
+func TestPaperClient_ResolvePinnedBuild(t *testing.T) {
+	jarContent := []byte("mock-paper-26.2-100-jar-content")
+	h := sha256.Sum256(jarContent)
+	expectedSHA256 := hex.EncodeToString(h[:])
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v3/projects/paper/versions/26.2/builds/100":
+			resp := FillBuildResponse{
+				ID:      100,
+				Channel: "STABLE",
+				Downloads: map[string]FillDownload{
+					"server:default": {
+						Name: "paper-26.2-100.jar",
+						Size: int64(len(jarContent)),
+						URL:  server.URL + "/download/paper-26.2-100.jar",
+						Checksums: FillChecksums{
+							SHA256: expectedSHA256,
+						},
+					},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		case "/download/paper-26.2-100.jar":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(jarContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewPaperClient(server.URL, server.Client())
+	tmpDir := t.TempDir()
+
+	result, err := client.ResolveAndDownload(context.Background(), config.ServerConfig{
+		Project: "paper",
+		Version: "26.2",
+		Build:   "100",
+	}, tmpDir)
+	if err != nil {
+		t.Fatalf("pinned resolve and download failed: %v", err)
+	}
+
+	if result.Filename != "paper-26.2-100.jar" {
+		t.Errorf("expected filename paper-26.2-100.jar, got %s", result.Filename)
+	}
+	if result.BuildID != 100 {
+		t.Errorf("expected build 100, got %d", result.BuildID)
+	}
+	if result.SHA256 != expectedSHA256 {
+		t.Errorf("expected hash %s, got %s", expectedSHA256, result.SHA256)
+	}
+}
