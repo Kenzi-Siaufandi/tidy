@@ -13,6 +13,7 @@ import (
 	"github.com/Kenzi-Siaufandi/tidy/internal/doctor"
 	"github.com/Kenzi-Siaufandi/tidy/internal/git"
 	"github.com/Kenzi-Siaufandi/tidy/internal/jarlink"
+	"github.com/Kenzi-Siaufandi/tidy/internal/progress"
 	"github.com/Kenzi-Siaufandi/tidy/internal/resolver"
 	"github.com/Kenzi-Siaufandi/tidy/internal/setup"
 	"github.com/Kenzi-Siaufandi/tidy/internal/state"
@@ -29,16 +30,17 @@ func main() {
 		os.Exit(setup.Run(os.Args[2:]))
 	}
 	var (
-		configFlag    = flag.String("config", "tidy.toml", "Path to tidy.toml configuration file")
-		workDirFlag   = flag.String("workdir", ".", "Working directory for Minecraft server root")
-		gitRepoFlag   = flag.String("git-repo", "", "Git repository URL to synchronize declarative configs (or env GIT_REPO)")
-		gitBranchFlag = flag.String("git-branch", "", "Git branch to synchronize (or env GIT_BRANCH, default 'main')")
-		gitTokenFlag  = flag.String("git-token", "", "Git authentication token (or env GIT_TOKEN / GITHUB_TOKEN)")
-		gitUserFlag   = flag.String("git-user", "", "Git username (or env GIT_USER)")
-		skipGitFlag   = flag.Bool("skip-git", false, "Skip Git synchronization")
-		skipTplFlag   = flag.Bool("skip-templates", false, "Skip Mustache template variable replacement")
-		noColorFlag   = flag.Bool("no-color", false, "Disable colored output")
-		versionFlag   = flag.Bool("version", false, "Print Tidy version and exit")
+		configFlag     = flag.String("config", "tidy.toml", "Path to tidy.toml configuration file")
+		workDirFlag    = flag.String("workdir", ".", "Working directory for Minecraft server root")
+		gitRepoFlag    = flag.String("git-repo", "", "Git repository URL to synchronize declarative configs (or env GIT_REPO)")
+		gitBranchFlag  = flag.String("git-branch", "", "Git branch to synchronize (or env GIT_BRANCH, default 'main')")
+		gitTokenFlag   = flag.String("git-token", "", "Git authentication token (or env GIT_TOKEN / GITHUB_TOKEN)")
+		gitUserFlag    = flag.String("git-user", "", "Git username (or env GIT_USER)")
+		skipGitFlag    = flag.Bool("skip-git", false, "Skip Git synchronization")
+		skipTplFlag    = flag.Bool("skip-templates", false, "Skip Mustache template variable replacement")
+		noColorFlag    = flag.Bool("no-color", false, "Disable colored output")
+		noProgressFlag = flag.Bool("no-progress", false, "Disable download progress bars")
+		versionFlag    = flag.Bool("version", false, "Print Tidy version and exit")
 	)
 
 	flag.Parse()
@@ -46,6 +48,7 @@ func main() {
 	if *noColorFlag {
 		ui.SetEnabled(false)
 	}
+	progress.Enabled = !*noProgressFlag
 
 	if *versionFlag {
 		fmt.Printf("Tidy v%s\n", Version)

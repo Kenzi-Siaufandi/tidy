@@ -46,6 +46,7 @@ func ResolveAndDownloadURL(ctx context.Context, pluginName string, pCfg config.P
 		ExpectedHash:  expectedSHA256,
 		HashAlgorithm: "sha256",
 		Client:        client,
+		ProgressLabel: filename,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to download and verify plugin %s from URL: %w", pluginName, err)

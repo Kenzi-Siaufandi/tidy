@@ -176,6 +176,7 @@ func (c *PurpurClient) ResolveAndDownload(ctx context.Context, serverCfg config.
 		ExpectedHash:  strings.TrimSpace(buildResp.MD5),
 		HashAlgorithm: "md5",
 		Client:        downloadClient,
+		ProgressLabel: filename,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to download and verify purpur jar: %w", err)
 	}

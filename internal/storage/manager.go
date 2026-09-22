@@ -87,6 +87,7 @@ func (m *Manager) SyncFile(ctx context.Context, name string, fCfg config.FileCon
 			ExpectedHash:  fCfg.SHA256,
 			HashAlgorithm: "sha256",
 			Client:        m.HTTPClient,
+			ProgressLabel: name,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed downloading archive for %s: %w", name, err)
@@ -119,6 +120,7 @@ func (m *Manager) SyncFile(ctx context.Context, name string, fCfg config.FileCon
 		ExpectedHash:  fCfg.SHA256,
 		HashAlgorithm: "sha256",
 		Client:        m.HTTPClient,
+		ProgressLabel: name,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed downloading file for %s: %w", name, err)

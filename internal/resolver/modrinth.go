@@ -376,6 +376,7 @@ func (c *ModrinthClient) Download(ctx context.Context, pluginName string, pCfg c
 		HashAlgorithm: hashAlgo,
 		Headers:       headers,
 		Client:        c.HTTPClient,
+		ProgressLabel: filename,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to download and verify plugin %s from Modrinth: %w", pluginName, err)

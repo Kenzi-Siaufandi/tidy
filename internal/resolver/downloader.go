@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Kenzi-Siaufandi/tidy/internal/progress"
 )
 
 // DownloadOptions contains options for downloading and verifying a file.
@@ -26,6 +28,10 @@ type DownloadOptions struct {
 	HashAlgorithm string // "sha256", "sha512", "sha1", "md5"
 	Headers       map[string]string
 	Client        *http.Client
+	// ProgressLabel enables a stderr progress bar for this download (see
+	// internal/progress). Empty disables it. Rendering is globally gated by
+	// progress.Enabled, which the CLI sets and tests leave off.
+	ProgressLabel string
 }
 
 // DownloadResult contains details about the completed download.
@@ -101,16 +107,19 @@ func DownloadAndVerify(ctx context.Context, opts DownloadOptions) (*DownloadResu
 		return nil, fmt.Errorf("failed to create temporary file %q: %w", tmpPath, err)
 	}
 
-	// Stream write while computing hash
-	tee := io.TeeReader(resp.Body, hasher)
+	// Stream write while computing hash, with an optional progress bar.
+	bar := progress.New(strings.TrimSpace(opts.ProgressLabel), resp.ContentLength)
+	tee := io.TeeReader(resp.Body, io.MultiWriter(hasher, bar))
 	written, copyErr := io.Copy(tmpFile, tee)
 	closeErr := tmpFile.Close()
 
 	if copyErr != nil {
+		bar.Abort()
 		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("download stream error for %s: %w", opts.URL, copyErr)
 	}
 	if closeErr != nil {
+		bar.Abort()
 		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("failed to close temporary file %q: %w", tmpPath, closeErr)
 	}
@@ -119,10 +128,12 @@ func DownloadAndVerify(ctx context.Context, opts DownloadOptions) (*DownloadResu
 	expectedHex := strings.ToLower(strings.TrimSpace(opts.ExpectedHash))
 
 	if subtle.ConstantTimeCompare([]byte(computedHex), []byte(expectedHex)) != 1 {
+		bar.Abort()
 		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("hash verification failed for %s: expected %s (%s), computed %s",
 			filepath.Base(opts.TargetPath), expectedHex, algo, computedHex)
 	}
+	bar.Finish()
 
 	// Move into destination atomically
 	if err := os.Rename(tmpPath, opts.TargetPath); err != nil {

@@ -95,6 +95,7 @@ func (c *PaperClient) ResolveAndDownload(ctx context.Context, serverCfg config.S
 		ExpectedHash:  strings.TrimSpace(download.Checksums.SHA256),
 		HashAlgorithm: "sha256",
 		Client:        downloadClient,
+		ProgressLabel: filename,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to download and verify server jar: %w", err)
