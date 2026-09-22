@@ -193,6 +193,74 @@ func TestGitClient_CloneAndIncrementalPull(t *testing.T) {
 	}
 }
 
+func TestGitClient_IsTrackedDirty(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed, skipping test")
+	}
+
+	tmpDir := t.TempDir()
+	originDir := filepath.Join(tmpDir, "origin")
+	targetDir := filepath.Join(tmpDir, "target")
+
+	if err := os.MkdirAll(originDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runCmd := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %s (%v)", args, string(out), err)
+		}
+	}
+
+	runCmd(originDir, "init")
+	runCmd(originDir, "config", "user.email", "test@test.com")
+	runCmd(originDir, "config", "user.name", "Test User")
+	runCmd(originDir, "checkout", "-b", "main")
+
+	if err := os.WriteFile(filepath.Join(originDir, "tidy.toml"), []byte("version = 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(originDir, "add", "tidy.toml")
+	runCmd(originDir, "commit", "-m", "initial commit")
+
+	client, err := NewClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Clone(context.Background(), Options{RepoURL: originDir, Branch: "main", TargetDir: targetDir}); err != nil {
+		t.Fatalf("clone failed: %v", err)
+	}
+
+	ctx := context.Background()
+	if dirty, err := client.IsTrackedDirty(ctx, targetDir, "tidy.toml"); err != nil || dirty {
+		t.Errorf("expected clean tidy.toml, got dirty=%v err=%v", dirty, err)
+	}
+
+	// Panel-style edit: local modification versus the remote.
+	if err := os.WriteFile(filepath.Join(targetDir, "tidy.toml"), []byte("version = 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if dirty, err := client.IsTrackedDirty(ctx, targetDir, "tidy.toml"); err != nil || !dirty {
+		t.Errorf("expected dirty tidy.toml, got dirty=%v err=%v", dirty, err)
+	}
+
+	// Restore: clean again.
+	runCmd(targetDir, "checkout", "--", "tidy.toml")
+	if dirty, err := client.IsTrackedDirty(ctx, targetDir, "tidy.toml"); err != nil || dirty {
+		t.Errorf("expected clean tidy.toml after restore, got dirty=%v err=%v", dirty, err)
+	}
+
+	// Untracked files are not diffs against the remote.
+	if err := os.WriteFile(filepath.Join(targetDir, "notes.txt"), []byte("local only\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if dirty, err := client.IsTrackedDirty(ctx, targetDir, "notes.txt"); err != nil || dirty {
+		t.Errorf("expected untracked notes.txt to report clean, got dirty=%v err=%v", dirty, err)
+	}
+}
+
 func TestGitClient_CloneNonEmptyDirectory(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed, skipping test")
@@ -274,6 +342,97 @@ func TestGitClient_CloneNonEmptyDirectory(t *testing.T) {
 	clonedTidy := filepath.Join(targetDir, "tidy.toml")
 	if _, err := os.Stat(clonedTidy); err != nil {
 		t.Errorf("expected tidy.toml to be cloned: %v", err)
+	}
+}
+
+func TestParsePorcelainDrift(t *testing.T) {
+	out := " M tidy.toml\nM  staged.yml\n D deleted.yml\nR  old.toml -> new.toml\n?? untracked.yml\n?? nested/dir/\n!! ignored.log\n"
+	st := parsePorcelainDrift(out)
+
+	wantModified := []string{"deleted.yml", "new.toml", "staged.yml", "tidy.toml"}
+	if len(st.Modified) != len(wantModified) {
+		t.Fatalf("expected %d modified, got %v", len(wantModified), st.Modified)
+	}
+	for i, want := range wantModified {
+		if st.Modified[i] != want {
+			t.Errorf("modified[%d] = %q, want %q", i, st.Modified[i], want)
+		}
+	}
+	if len(st.Untracked) != 2 || st.Untracked[0] != "nested/dir/" || st.Untracked[1] != "untracked.yml" {
+		t.Errorf("unexpected untracked: %v", st.Untracked)
+	}
+
+	if st := parsePorcelainDrift(""); len(st.Modified) != 0 || len(st.Untracked) != 0 {
+		t.Errorf("expected empty drift for clean tree, got %+v", st)
+	}
+	// Quoted paths (spaces) resolve to the real name.
+	st = parsePorcelainDrift(" M \"my plugin/config.yml\"\n")
+	if len(st.Modified) != 1 || st.Modified[0] != "my plugin/config.yml" {
+		t.Errorf("unexpected quoted-path drift: %+v", st)
+	}
+}
+
+func TestGitClient_StatusDrift(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed, skipping test")
+	}
+
+	tmpDir := t.TempDir()
+	originDir := filepath.Join(tmpDir, "origin")
+	targetDir := filepath.Join(tmpDir, "target")
+
+	if err := os.MkdirAll(originDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runCmd := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %s (%v)", args, string(out), err)
+		}
+	}
+
+	runCmd(originDir, "init")
+	runCmd(originDir, "config", "user.email", "test@test.com")
+	runCmd(originDir, "config", "user.name", "Test User")
+	runCmd(originDir, "checkout", "-b", "main")
+
+	if err := os.WriteFile(filepath.Join(originDir, "tidy.toml"), []byte("version = 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(originDir, "add", "tidy.toml")
+	runCmd(originDir, "commit", "-m", "initial commit")
+
+	client, err := NewClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Clone(context.Background(), Options{RepoURL: originDir, Branch: "main", TargetDir: targetDir}); err != nil {
+		t.Fatalf("clone failed: %v", err)
+	}
+
+	ctx := context.Background()
+	if st, err := client.StatusDrift(ctx, targetDir); err != nil || len(st.Modified) != 0 || len(st.Untracked) != 0 {
+		t.Fatalf("expected clean drift, got %+v err=%v", st, err)
+	}
+
+	// Tracked edit + brand-new file.
+	if err := os.WriteFile(filepath.Join(targetDir, "tidy.toml"), []byte("version = 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "extra.yml"), []byte("new\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := client.StatusDrift(ctx, targetDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Modified) != 1 || st.Modified[0] != "tidy.toml" {
+		t.Errorf("unexpected modified: %v", st.Modified)
+	}
+	if len(st.Untracked) != 1 || st.Untracked[0] != "extra.yml" {
+		t.Errorf("unexpected untracked: %v", st.Untracked)
 	}
 }
 

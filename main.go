@@ -25,6 +25,108 @@ import (
 
 const Version = version.Version
 
+// driftReportName is the panel-viewable drift report inside .tidy.
+const driftReportName = ".tidy/drift-report.txt"
+
+// driftReportCap bounds each report section so messy servers stay readable.
+const driftReportCap = 50
+
+// reportDrift snapshots working-tree drift versus the git remote into
+// .tidy/drift-report.txt and warns on console. It runs before Pull's
+// reset --hard, while the evidence still exists. Files substituted by the
+// previous run's templating are expected-dirty and filtered out.
+// Best-effort: never fails the boot.
+func reportDrift(ctx context.Context, gitClient *git.Client, workDir, configFlag string, previousState *state.State) {
+	drift, err := gitClient.StatusDrift(ctx, workDir)
+	if err != nil {
+		return
+	}
+	templated := make(map[string]bool)
+	if previousState != nil {
+		for _, p := range previousState.TemplatedFiles {
+			if s := strings.TrimSpace(p); s != "" {
+				templated[s] = true
+			}
+		}
+	}
+	var modified []string
+	for _, p := range drift.Modified {
+		if !templated[p] {
+			modified = append(modified, p)
+		}
+	}
+	writeDriftReport(workDir, modified, drift.Untracked)
+	if len(modified)+len(drift.Untracked) == 0 {
+		return
+	}
+	if rel := configRelPath(workDir, configFlag); rel != "" {
+		for _, p := range modified {
+			if p == rel {
+				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Git: local %s differs from the remote and will be discarded by sync — commit it to keep it", rel)))
+				break
+			}
+		}
+	}
+	fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Git: %d file(s) differ from the remote — see %s",
+		len(modified)+len(drift.Untracked), driftReportName)))
+}
+
+// configRelPath returns the config path repo-relative in slash form, or ""
+// when it lives outside the workdir (no remote to diff against).
+func configRelPath(workDir, configFlag string) string {
+	rel := strings.TrimSpace(configFlag)
+	if rel == "" {
+		return ""
+	}
+	if filepath.IsAbs(rel) {
+		r, err := filepath.Rel(workDir, rel)
+		if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			return ""
+		}
+		rel = r
+	}
+	return filepath.ToSlash(rel)
+}
+
+// formatDriftReport renders the panel-viewable drift report body.
+func formatDriftReport(modified, untracked []string, now time.Time) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Tidy drift report — %s\n", now.UTC().Format(time.RFC3339))
+	b.WriteString("# Local files differing from the git remote.\n")
+	b.WriteString("# Tracked modifications are DISCARDED on sync (reset --hard); commit them to keep them.\n")
+	b.WriteString("# Templated ({{VAR}}) substitutions from the last run are excluded.\n")
+	writeDriftSection(&b, "Modified vs remote", modified)
+	writeDriftSection(&b, "Untracked — not in remote", untracked)
+	return b.String()
+}
+
+func writeDriftSection(b *strings.Builder, title string, paths []string) {
+	fmt.Fprintf(b, "\n## %s (%d)\n", title, len(paths))
+	if len(paths) == 0 {
+		b.WriteString("(none)\n")
+		return
+	}
+	shown := paths
+	extra := ""
+	if len(shown) > driftReportCap {
+		shown = shown[:driftReportCap]
+		extra = fmt.Sprintf("(and %d more)\n", len(paths)-driftReportCap)
+	}
+	for _, p := range shown {
+		b.WriteString(p + "\n")
+	}
+	b.WriteString(extra)
+}
+
+// writeDriftReport persists the drift report under .tidy. Best-effort.
+func writeDriftReport(workDir string, modified, untracked []string) {
+	if err := os.MkdirAll(filepath.Join(workDir, ".tidy"), 0755); err != nil {
+		return
+	}
+	content := formatDriftReport(modified, untracked, time.Now())
+	_ = os.WriteFile(filepath.Join(workDir, driftReportName), []byte(content), 0644)
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "setup" {
 		os.Exit(setup.Run(os.Args[2:]))
@@ -150,6 +252,10 @@ func main() {
 			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Git: Initial clone complete (HEAD: %s)", git.ShortSHA(currentCommit))))
 		} else {
 			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Git: Checking for upstream updates from %s (branch: %s)...", git.MaskURL(gitRepo), gitBranch)))
+			// Snapshot drift versus the remote before sync discards it, and
+			// leave a panel-viewable report in .tidy. Best-effort; never
+			// fails the boot.
+			reportDrift(ctx, gitClient, workDir, *configFlag, previousState)
 			pullRes, err := gitClient.Pull(ctx, gitOpts)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Git pull failed: %v", err)))
@@ -420,6 +526,15 @@ func main() {
 				if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
 					_ = os.Remove(filepath.Join(workDir, "plugins", oldPlugin.Filename))
 				}
+				// The jar is swapped but the plugin's on-disk configs/data are
+				// left untouched, so a breaking update can load stale files.
+				// Surface that instead of failing silently or wiping data.
+				if oldPlugin != nil && strings.TrimSpace(oldPlugin.ResolvedVersion) != "" &&
+					strings.TrimSpace(res.VersionNumber) != "" &&
+					oldPlugin.ResolvedVersion != res.VersionNumber {
+					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Plugin [%s]: updated %s -> %s; existing configs were left untouched — review breaking changes",
+						pluginName, oldPlugin.ResolvedVersion, res.VersionNumber)))
+				}
 			}
 
 			// Fast path for "latest": resolve metadata first and skip the
@@ -558,6 +673,9 @@ func main() {
 	}
 
 	// 6. Template Variable Replacement (Mustache {{VAR_NAME}})
+	// This run's substituted files are recorded in state so the next boot's
+	// drift report can tell expected templating apart from external edits.
+	var templatedFiles []string
 	if !*skipTplFlag && !cfg.Templates.Disabled {
 		fmt.Println(ui.Cyan("[*] Templates: Scanning config files for {{VAR_NAME}} variable replacements..."))
 		tplResult, err := templating.ProcessDirectory(workDir, cfg.Templates.Paths)
@@ -566,6 +684,9 @@ func main() {
 		} else {
 			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Templates: Processed %d configs with %d variable replacements across %d modified files",
 				tplResult.FilesProcessed, tplResult.Replacements, len(tplResult.ModifiedFiles))))
+			for _, p := range tplResult.ModifiedFiles {
+				templatedFiles = append(templatedFiles, filepath.ToSlash(p))
+			}
 		}
 	}
 
@@ -591,8 +712,9 @@ func main() {
 			Filename: activeServerFilename,
 			SHA256:   activeServerSHA256,
 		},
-		Plugins: installedPlugins,
-		Files:   installedFiles,
+		Plugins:        installedPlugins,
+		Files:          installedFiles,
+		TemplatedFiles: templatedFiles,
 	}
 
 	if err := state.SaveState(workDir, currentState); err != nil {

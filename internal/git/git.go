@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -205,6 +207,95 @@ func (c *Client) ResetWorkingTree(ctx context.Context, dir string) error {
 		return fmt.Errorf("git reset failed in %s: %s (%w)", dir, strings.TrimSpace(stderr.String()), err)
 	}
 	return nil
+}
+
+// IsTrackedDirty reports whether a tracked file has local modifications
+// versus HEAD (i.e. it differs from the remote state and would be discarded
+// by ResetWorkingTree). Untracked files report false: there is no remote
+// version to differ from.
+func (c *Client) IsTrackedDirty(ctx context.Context, dir, relPath string) (bool, error) {
+	relPath = filepath.ToSlash(strings.TrimSpace(relPath))
+	if relPath == "" {
+		return false, fmt.Errorf("file path cannot be empty")
+	}
+	cmd := exec.CommandContext(ctx, c.GitPath, "status", "--porcelain", "--", relPath)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git status failed in %s: %w", dir, err)
+	}
+	for _, p := range parsePorcelainDrift(string(out)).Modified {
+		if p == filepath.ToSlash(relPath) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// DriftStatus splits working-tree drift versus HEAD into tracked
+// modifications and untracked files. Ignored paths never appear.
+type DriftStatus struct {
+	Modified  []string // tracked files differing from HEAD (repo-relative, slash form)
+	Untracked []string // files with no remote version (repo-relative, slash form)
+}
+
+// StatusDrift runs git status --porcelain over dir and splits the result.
+// It reports an error when dir is not a git repository.
+func (c *Client) StatusDrift(ctx context.Context, dir string) (*DriftStatus, error) {
+	cmd := exec.CommandContext(ctx, c.GitPath, "status", "--porcelain")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git status failed in %s: %w", dir, err)
+	}
+	return parsePorcelainDrift(string(out)), nil
+}
+
+// parsePorcelainDrift splits porcelain status output into tracked
+// modifications versus untracked files. Ignored ("!!") entries are skipped.
+// Rename entries ("R  old -> new") resolve to the new path; quoted paths
+// (core.quotePath) are unquoted when possible.
+func parsePorcelainDrift(out string) *DriftStatus {
+	st := &DriftStatus{}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if len(line) < 4 {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "??"):
+			if p := cleanPorcelainPath(line[3:]); p != "" {
+				st.Untracked = append(st.Untracked, p)
+			}
+		case strings.HasPrefix(line, "!!"):
+			continue
+		default:
+			path := cleanPorcelainPath(strings.TrimSpace(line[3:]))
+			if idx := strings.Index(path, " -> "); idx >= 0 {
+				path = path[idx+4:]
+			}
+			if path != "" {
+				st.Modified = append(st.Modified, path)
+			}
+		}
+	}
+	sort.Strings(st.Modified)
+	sort.Strings(st.Untracked)
+	return st
+}
+
+// cleanPorcelainPath normalizes a porcelain path: unquotes C-quoted names
+// and forces slash separators.
+func cleanPorcelainPath(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if len(raw) >= 2 && strings.HasPrefix(raw, "\"") && strings.HasSuffix(raw, "\"") {
+		if unquoted, err := strconv.Unquote(raw); err == nil {
+			raw = unquoted
+		} else {
+			raw = strings.Trim(raw, "\"")
+		}
+	}
+	return filepath.ToSlash(raw)
 }
 
 // isDirEmpty returns true if a directory does not exist or has no entries.

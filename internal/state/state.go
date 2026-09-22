@@ -18,12 +18,13 @@ const StateFilename = ".tidy/state.json"
 
 // State stores persistent tracking metadata about installed software, plugins, and assets.
 type State struct {
-	InstalledAt  time.Time              `json:"installed_at"`
-	LastSyncedAt time.Time              `json:"last_synced_at"`
-	GitCommit    string                 `json:"git_commit,omitempty"`
-	Server       ServerState            `json:"server"`
-	Plugins      map[string]PluginState `json:"plugins"`
-	Files        map[string]FileState   `json:"files,omitempty"`
+	InstalledAt    time.Time              `json:"installed_at"`
+	LastSyncedAt   time.Time              `json:"last_synced_at"`
+	GitCommit      string                 `json:"git_commit,omitempty"`
+	Server         ServerState            `json:"server"`
+	Plugins        map[string]PluginState `json:"plugins"`
+	Files          map[string]FileState   `json:"files,omitempty"`
+	TemplatedFiles []string               `json:"templated_files,omitempty"` // repo-relative slash paths substituted last run (expected-dirty filter for drift reports)
 }
 
 // ServerState records the active server software metadata.
