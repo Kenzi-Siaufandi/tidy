@@ -26,6 +26,14 @@ source = "url"
 url = "https://github.com/MilkBowl/Vault/releases/download/1.7.3/Vault.jar"
 sha256 = "a6b5ed97f43a5cf5bbaf00a7c8cd23c5afc9bd003f849875af8b36e6cf77d01d"
 
+# Manually-uploaded jar: upload the file to path first (e.g. via the panel
+# file manager), then Tidy verifies its SHA-256 every run (nothing is
+# downloaded). Get the hash with: sha256sum plugins/MyCustomPlugin.jar
+# [plugins.MyCustomPlugin]
+# source = "local"
+# path = "plugins/MyCustomPlugin.jar"
+# sha256 = "a6b5ed97f43a5cf5bbaf00a7c8cd23c5afc9bd003f849875af8b36e6cf77d01d"
+
 # --- Large Files & World Downloads (Direct HTTPS with Mandatory SHA-256) ---
 
 # Example 1: Minecraft World from Direct HTTPS Archive (.tar.gz / .zip)

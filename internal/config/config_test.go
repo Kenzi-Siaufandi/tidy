@@ -347,3 +347,132 @@ channel = "BETA"
 		t.Errorf("expected game_version '1.21.1', got %q", p.GameVersion)
 	}
 }
+
+func TestParseConfig_LocalPluginValid(t *testing.T) {
+	raw := `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Custom]
+source = "local"
+path = "plugins/Custom.jar"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`
+	cfg, err := ParseConfig([]byte(raw))
+	if err != nil {
+		t.Fatalf("expected valid local plugin config, got error: %v", err)
+	}
+	p := cfg.Plugins["Custom"]
+	if p.Path != "plugins/Custom.jar" {
+		t.Errorf("expected path plugins/Custom.jar, got %q", p.Path)
+	}
+}
+
+func TestParseConfig_LocalPluginValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "local missing path",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "local"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+		{
+			name: "local missing sha256",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "local"
+path = "plugins/Test.jar"
+`,
+		},
+		{
+			name: "local non-jar path",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "local"
+path = "plugins/readme.txt"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+		{
+			name: "local with url",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "local"
+path = "plugins/Test.jar"
+url = "https://example.com/test.jar"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+		{
+			name: "local with project_id",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "local"
+path = "plugins/Test.jar"
+project_id = "test"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+		{
+			name: "url with path",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "url"
+url = "https://example.com/test.jar"
+path = "plugins/Test.jar"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+		{
+			name: "modrinth with path",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "modrinth"
+project_id = "test"
+path = "plugins/Test.jar"
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := ParseConfig([]byte(tt.raw)); err == nil {
+				t.Errorf("expected error for %s, got nil", tt.name)
+			}
+		})
+	}
+}

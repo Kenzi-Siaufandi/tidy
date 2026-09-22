@@ -29,14 +29,15 @@ type ServerConfig struct {
 
 // PluginConfig defines an individual plugin dependency.
 type PluginConfig struct {
-	Source      string `toml:"source"`       // "modrinth" or "url"
+	Source      string `toml:"source"`       // "modrinth", "url", or "local"
 	ProjectID   string `toml:"project_id"`   // required for modrinth
 	Version     string `toml:"version"`      // modrinth plugin version pin, or "latest" (default)
 	GameVersion string `toml:"game_version"` // modrinth Minecraft version filter, e.g. "1.21.1"
 	Loader      string `toml:"loader"`       // modrinth loader filter, defaults to "paper"
 	Channel     string `toml:"channel"`      // "release" (default), "beta" (+beta), "alpha" (all)
 	URL         string `toml:"url"`          // required for url
-	SHA256      string `toml:"sha256"`       // mandatory for url, optional for modrinth
+	Path        string `toml:"path"`         // required for local: path to manually-uploaded jar (relative to workdir or absolute)
+	SHA256      string `toml:"sha256"`       // mandatory for url and local, optional for modrinth
 }
 
 // DefaultModrinthLoader is used when a modrinth plugin omits 'loader'.
@@ -167,6 +168,12 @@ func (c *Config) Validate() error {
 			if strings.TrimSpace(p.ProjectID) == "" {
 				return fmt.Errorf("plugin %q: modrinth source requires 'project_id'", name)
 			}
+			if strings.TrimSpace(p.URL) != "" {
+				return fmt.Errorf("plugin %q: 'url' only applies to url source", name)
+			}
+			if strings.TrimSpace(p.Path) != "" {
+				return fmt.Errorf("plugin %q: 'path' only applies to local source", name)
+			}
 			// 'version' is optional and defaults to "latest" (track newest
 			// compatible release). Apply defaults so downstream code and
 			// state comparisons see normalized values.
@@ -196,8 +203,14 @@ func (c *Config) Validate() error {
 			if strings.TrimSpace(p.URL) == "" {
 				return fmt.Errorf("plugin %q: url source requires 'url'", name)
 			}
+			if strings.TrimSpace(p.Path) != "" {
+				return fmt.Errorf("plugin %q: 'path' only applies to local source", name)
+			}
 			if strings.TrimSpace(p.GameVersion) != "" || strings.TrimSpace(p.Loader) != "" || strings.TrimSpace(p.Channel) != "" {
 				return fmt.Errorf("plugin %q: 'game_version'/'loader'/'channel' only apply to modrinth source", name)
+			}
+			if strings.TrimSpace(p.ProjectID) != "" || strings.TrimSpace(p.Version) != "" {
+				return fmt.Errorf("plugin %q: 'project_id'/'version' only apply to modrinth source", name)
 			}
 			sha := strings.TrimSpace(p.SHA256)
 			if sha == "" {
@@ -206,8 +219,30 @@ func (c *Config) Validate() error {
 			if err := validateSHA256Hex(sha); err != nil {
 				return fmt.Errorf("plugin %q: invalid 'sha256': %w", name, err)
 			}
+		case "local":
+			if strings.TrimSpace(p.Path) == "" {
+				return fmt.Errorf("plugin %q: local source requires 'path' to the manually-uploaded jar (e.g. 'plugins/MyPlugin.jar')", name)
+			}
+			if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(p.Path)), ".jar") {
+				return fmt.Errorf("plugin %q: local source 'path' must point to a .jar file", name)
+			}
+			if strings.TrimSpace(p.URL) != "" {
+				return fmt.Errorf("plugin %q: 'url' only applies to url source", name)
+			}
+			if strings.TrimSpace(p.ProjectID) != "" || strings.TrimSpace(p.Version) != "" || strings.TrimSpace(p.GameVersion) != "" || strings.TrimSpace(p.Loader) != "" || strings.TrimSpace(p.Channel) != "" {
+				return fmt.Errorf("plugin %q: 'project_id'/'version'/'game_version'/'loader'/'channel' only apply to modrinth source", name)
+			}
+			sha := strings.TrimSpace(p.SHA256)
+			if sha == "" {
+				return fmt.Errorf("plugin %q: local source MUST provide 'sha256' for verification", name)
+			}
+			if err := validateSHA256Hex(sha); err != nil {
+				return fmt.Errorf("plugin %q: invalid 'sha256': %w", name, err)
+			}
+			p.Path = strings.TrimSpace(p.Path)
+			c.Plugins[name] = p
 		default:
-			return fmt.Errorf("plugin %q: unsupported source %q (supported: 'modrinth', 'url')", name, p.Source)
+			return fmt.Errorf("plugin %q: unsupported source %q (supported: 'modrinth', 'url', 'local')", name, p.Source)
 		}
 	}
 

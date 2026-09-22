@@ -23,13 +23,14 @@ type WizardServer struct {
 // WizardPlugin holds one [plugins.<name>] answer.
 type WizardPlugin struct {
 	Name        string
-	Source      string // "modrinth" or "url"
+	Source      string // "modrinth", "url", or "local"
 	ProjectID   string
 	Version     string
 	GameVersion string
 	Loader      string
 	Channel     string
 	URL         string
+	Path        string
 	SHA256      string
 }
 
@@ -74,6 +75,12 @@ func BuildTOML(spec WizardSpec) string {
 		if strings.EqualFold(strings.TrimSpace(p.Source), "url") {
 			b.WriteString("source = \"url\"\n")
 			b.WriteString("url = " + tomlString(p.URL) + "\n")
+			b.WriteString("sha256 = " + tomlString(strings.ToLower(strings.TrimSpace(p.SHA256))) + "\n")
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(p.Source), "local") {
+			b.WriteString("source = \"local\"\n")
+			b.WriteString("path = " + tomlString(p.Path) + "\n")
 			b.WriteString("sha256 = " + tomlString(strings.ToLower(strings.TrimSpace(p.SHA256))) + "\n")
 			continue
 		}
@@ -170,13 +177,35 @@ func runWizard(p *prompter) WizardSpec {
 		if name == "" {
 			break
 		}
-		source := strings.ToLower(p.ask(fmt.Sprintf("Source for %q [modrinth/url]", name), "modrinth"))
-		if source != "url" && source != "modrinth" {
+		source := strings.ToLower(p.ask(fmt.Sprintf("Source for %q [modrinth/url/local]", name), "modrinth"))
+		if source != "url" && source != "modrinth" && source != "local" {
 			fmt.Fprintln(p.w, ui.Yellow("[!] Unknown source, using modrinth."))
 			source = "modrinth"
 		}
 		plugin := WizardPlugin{Name: name, Source: source}
-		if source == "url" {
+		if source == "local" {
+			plugin.Path = p.askRequired("Local jar path (e.g. plugins/MyPlugin.jar)")
+			if plugin.Path == "" {
+				fmt.Fprintln(p.w, ui.Yellow("[!] Skipped: path is required for local plugins."))
+				continue
+			}
+			for {
+				sha := p.ask("SHA-256 (64 hex chars)", "")
+				if sha == "" {
+					fmt.Fprintln(p.w, ui.Yellow("[!] Skipped: sha256 is required for local plugins."))
+					plugin.Path = ""
+					break
+				}
+				if isHex64(strings.TrimSpace(sha)) {
+					plugin.SHA256 = sha
+					break
+				}
+				fmt.Fprintln(p.w, ui.Yellow("[!] Must be exactly 64 hex characters."))
+			}
+			if plugin.Path == "" {
+				continue
+			}
+		} else if source == "url" {
 			plugin.URL = p.askRequired("Download URL")
 			if plugin.URL == "" {
 				fmt.Fprintln(p.w, ui.Yellow("[!] Skipped: URL is required."))

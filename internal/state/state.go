@@ -47,6 +47,7 @@ type PluginState struct {
 	Channel         string `json:"channel,omitempty"`
 	ProjectID       string `json:"project_id,omitempty"`
 	URL             string `json:"url,omitempty"`
+	Path            string `json:"path,omitempty"` // configured path for local source (manually-uploaded jar)
 	HashAlgo        string `json:"hash_algo"`
 	Hash            string `json:"hash"`
 	SHA256          string `json:"sha256,omitempty"` // always computed for local cache validation

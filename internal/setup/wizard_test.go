@@ -98,3 +98,25 @@ func TestCmdNew_Scripted(t *testing.T) {
 		t.Error("expected refusal when tidy.toml exists without --force")
 	}
 }
+
+func TestBuildTOML_LocalPlugin(t *testing.T) {
+	spec := WizardSpec{
+		Server:  WizardServer{Project: "paper", Version: "26.2", Build: "latest"},
+		Plugins: []WizardPlugin{{Name: "Custom", Source: "local", Path: "plugins/Custom.jar", SHA256: strings.Repeat("b", 64)}},
+	}
+	out := BuildTOML(spec)
+	for _, want := range []string{
+		`[plugins.Custom]`, `source = "local"`, `path = "plugins/Custom.jar"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("BuildTOML missing %q:\n%s", want, out)
+		}
+	}
+	cfg, err := config.ParseConfig([]byte(out))
+	if err != nil {
+		t.Fatalf("generated local TOML does not validate: %v\n%s", err, out)
+	}
+	if p := cfg.Plugins["Custom"]; p.Path != "plugins/Custom.jar" {
+		t.Errorf("unexpected local path: %+v", p)
+	}
+}

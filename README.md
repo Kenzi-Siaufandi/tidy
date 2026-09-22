@@ -19,6 +19,7 @@ Tidy synchronizes declarative server configurations from Git, reconciles changes
 - **PaperMC Fill API Resolution**: Resolves Paper builds (e.g. Paper `26.2`), downloads the upstream jar into the root directory, and strictly verifies SHA-256 checksums. Direct `url` is disallowed under `[server]`.
 - **PurpurMC API Resolution**: `project = "purpur"` (e.g. version `1.21.8`) resolves via `api.purpurmc.org`, verifies the upstream MD5, records local SHA-256 in state, and refuses non-`success` builds.
 - **Modrinth API Resolution**: Fetches plugins via Modrinth v2 API with a compliant `User-Agent: Kenzi-Siaufandi/tidy/0.2.1 (https://github.com/Kenzi-Siaufandi/tidy)` header, places jars into `./plugins/`, and verifies hashes.
+- **Local Plugins (`source = "local"`)**: Verifies manually-uploaded jars at `path` against a mandatory `sha256` every run; nothing is downloaded, a missing or tampered jar is fatal.
 - **Large Files & World Management (`[files.<name>]` / `[worlds.<name>]`)**:
   - Direct HTTPS streaming downloads with mandatory SHA-256 checksums.
   - Destination `path` directory parameter (e.g. `path = "world"`, `path = "world_nether"`).
@@ -94,6 +95,12 @@ version = "2.11.2"
 source = "url"
 url = "https://github.com/MilkBowl/Vault/releases/download/1.7.3/Vault.jar"
 sha256 = "a6b5ed97f43a5cf5bbaf00a7c8cd23c5afc9bd003f849875af8b36e6cf77d01d"
+
+# Manually-uploaded jar (verified, never downloaded):
+# [plugins.MyCustomPlugin]
+# source = "local"
+# path = "plugins/MyCustomPlugin.jar"
+# sha256 = "a6b5ed97f43a5cf5bbaf00a7c8cd23c5afc9bd003f849875af8b36e6cf77d01d"
 
 [files.overworld]
 source = "http"

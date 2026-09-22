@@ -285,8 +285,14 @@ func main() {
 	if previousState != nil {
 		for oldName, oldP := range previousState.Plugins {
 			if _, stillPresent := cfg.Plugins[oldName]; !stillPresent {
-				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[-] Plugin [%s]: Removed from tidy.toml. Deleting %s...", oldName, oldP.Filename)))
+				oldSource := strings.ToLower(strings.TrimSpace(oldP.Source))
 				oldPath := filepath.Join(workDir, "plugins", oldP.Filename)
+				if oldSource == "local" && strings.TrimSpace(oldP.Path) != "" {
+					if abs, _, err := resolver.ResolveLocalPath(config.PluginConfig{Path: oldP.Path}, workDir); err == nil {
+						oldPath = abs
+					}
+				}
+				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[-] Plugin [%s]: Removed from tidy.toml. Deleting %s...", oldName, oldP.Filename)))
 				if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
 					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: failed to delete removed plugin %s: %v", oldPath, err)))
 				}
@@ -340,10 +346,35 @@ func main() {
 					} else if !strings.EqualFold(strings.TrimSpace(oldP.SHA256), strings.TrimSpace(pCfg.SHA256)) {
 						configChanged = true
 					}
+				case "local":
+					// Local source is manually uploaded: any path or SHA change must trigger re-verification.
+					newPath := strings.TrimSpace(pCfg.Path)
+					if oldP.Path != "" {
+						if oldP.Path != newPath {
+							configChanged = true
+						} else if !strings.EqualFold(strings.TrimSpace(oldP.SHA256), strings.TrimSpace(pCfg.SHA256)) {
+							configChanged = true
+						}
+					} else if oldP.SHA256 != "" {
+						// Backward compat: pre-local states never carry source=local,
+						// but guard anyway via filename + hash.
+						if _, wantFile, err := resolver.ResolveLocalPath(pCfg, workDir); err != nil || oldP.Filename != wantFile {
+							configChanged = true
+						} else if !strings.EqualFold(strings.TrimSpace(oldP.SHA256), strings.TrimSpace(pCfg.SHA256)) {
+							configChanged = true
+						}
+					} else {
+						configChanged = true
+					}
 				}
 
 				if !configChanged && !isLatest {
 					localPath := filepath.Join(workDir, "plugins", oldP.Filename)
+					if source == "local" && strings.TrimSpace(oldP.Path) != "" {
+						if abs, _, err := resolver.ResolveLocalPath(config.PluginConfig{Path: oldP.Path}, workDir); err == nil {
+							localPath = abs
+						}
+					}
 					// Check local file existence and SHA-256
 					if oldP.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldP.SHA256) {
 						fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] Plugin [%s]: %s is up-to-date (SHA-256 verified, skipped download)", pluginName, oldP.Filename)))
@@ -452,8 +483,39 @@ func main() {
 			if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
 				_ = os.Remove(filepath.Join(workDir, "plugins", oldPlugin.Filename))
 			}
+		case "local":
+			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Verifying manually-uploaded jar (%s) with mandatory SHA-256...", pluginName, strings.TrimSpace(pCfg.Path))))
+			res, err := resolver.VerifyLocalPlugin(pluginName, pCfg, workDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to verify local plugin %q: %v", pluginName, err)))
+				os.Exit(1)
+			}
+			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Plugin [%s]: Verified %s (SHA256: %s, %d bytes)",
+				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)))
+
+			installedPlugins[pluginName] = state.PluginState{
+				Source:   "local",
+				Filename: res.Filename,
+				Path:     strings.TrimSpace(pCfg.Path),
+				HashAlgo: "sha256",
+				Hash:     res.Hash,
+				SHA256:   res.SHA256,
+			}
+			if oldPlugin != nil && strings.ToLower(strings.TrimSpace(oldPlugin.Source)) == "local" {
+				oldAbs := ""
+				if strings.TrimSpace(oldPlugin.Path) != "" {
+					if abs, _, err := resolver.ResolveLocalPath(config.PluginConfig{Path: oldPlugin.Path}, workDir); err == nil {
+						oldAbs = abs
+					}
+				} else if oldPlugin.Filename != "" {
+					oldAbs = filepath.Join(workDir, "plugins", oldPlugin.Filename)
+				}
+				if oldAbs != "" && oldAbs != res.FilePath {
+					_ = os.Remove(oldAbs)
+				}
+			}
 		default:
-			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: plugin %q has unsupported source %q (supported: 'modrinth', 'url')", pluginName, pCfg.Source)))
+			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: plugin %q has unsupported source %q (supported: 'modrinth', 'url', 'local')", pluginName, pCfg.Source)))
 			os.Exit(1)
 		}
 	}
