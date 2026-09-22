@@ -26,8 +26,8 @@ func TestFormatBytes(t *testing.T) {
 		-5:         "0 B",
 	}
 	for n, want := range cases {
-		if got := formatBytes(n); got != want {
-			t.Errorf("formatBytes(%d) = %q, want %q", n, got, want)
+		if got := FormatBytes(n); got != want {
+			t.Errorf("FormatBytes(%d) = %q, want %q", n, got, want)
 		}
 	}
 }

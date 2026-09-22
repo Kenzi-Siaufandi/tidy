@@ -66,6 +66,14 @@ func NewTo(out io.Writer, label string, total int64) *Bar {
 	}
 }
 
+// ResumeFrom presets already-downloaded bytes (a resumed Range request), so
+// the bar and speed account for the full file. Call right after New.
+func (b *Bar) ResumeFrom(offset int64) {
+	if offset > 0 {
+		b.written = offset
+	}
+}
+
 // Write counts bytes and throttles live rendering. It never fails so it can
 // sit inside an io.MultiWriter download stream.
 func (b *Bar) Write(p []byte) (int, error) {
@@ -113,7 +121,7 @@ func (b *Bar) render(final bool) {
 	elapsed := time.Since(b.start).Seconds()
 	var speed string
 	if elapsed > 0 {
-		speed = formatBytes(int64(float64(b.written)/elapsed)) + "/s"
+		speed = FormatBytes(int64(float64(b.written)/elapsed)) + "/s"
 	}
 
 	var sb strings.Builder
@@ -128,13 +136,13 @@ func (b *Bar) render(final bool) {
 		if frac > 1 || final {
 			frac = 1
 		}
-		fmt.Fprintf(&sb, "[%s] %s/%s (%d%%", barString(frac), formatBytes(b.written), formatBytes(b.total), int(frac*100))
+		fmt.Fprintf(&sb, "[%s] %s/%s (%d%%", barString(frac), FormatBytes(b.written), FormatBytes(b.total), int(frac*100))
 		if speed != "" {
 			fmt.Fprintf(&sb, ", %s", speed)
 		}
 		sb.WriteString(")")
 	} else {
-		fmt.Fprintf(&sb, "%s %s downloaded", spinnerFrames[b.frames%len(spinnerFrames)], formatBytes(b.written))
+		fmt.Fprintf(&sb, "%s %s downloaded", spinnerFrames[b.frames%len(spinnerFrames)], FormatBytes(b.written))
 		if speed != "" {
 			fmt.Fprintf(&sb, " (%s)", speed)
 		}
@@ -163,8 +171,8 @@ func barString(frac float64) string {
 	return strings.Repeat("=", filled) + ">" + strings.Repeat(" ", barWidth-filled-1)
 }
 
-// formatBytes renders a byte count as B/KB/MB/GB/TB.
-func formatBytes(n int64) string {
+// FormatBytes renders a byte count as B/KB/MB/GB/TB.
+func FormatBytes(n int64) string {
 	if n < 0 {
 		n = 0
 	}
