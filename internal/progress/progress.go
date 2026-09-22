@@ -2,6 +2,11 @@
 // long downloads (server jars, plugins, worlds). Bars are opt-in per
 // download via a label and globally gated by Enabled, so unit tests and
 // library callers stay quiet unless they explicitly opt in.
+//
+// On a terminal the bar redraws live with \r; when piped (docker logs, the
+// Pterodactyl panel — which only forward newline-terminated lines) it
+// degrades to milestone lines every few percent plus a heartbeat, so slow
+// transfers still prove they are alive instead of looking stuck.
 package progress
 
 import (
@@ -15,9 +20,17 @@ import (
 const (
 	barWidth      = 24
 	maxLabelWidth = 36
-	// refreshInterval throttles live updates so fast networks and the
+	// refreshInterval throttles live TTY updates so fast networks and the
 	// Pterodactyl console are not flooded with redraws.
 	refreshInterval = 200 * time.Millisecond
+	// Piped output (docker logs, the Pterodactyl panel) only forwards
+	// newline-terminated lines, so \r redraws would pile up invisibly until
+	// the container stops. There we print milestone lines instead: every
+	// pipeMilestoneStep percent, every pipeByteStep bytes when the size is
+	// unknown, plus a heartbeat so slow links still prove they are alive.
+	pipeMilestoneStep = 5
+	pipeByteStep      = 5 << 20 // 5 MiB
+	pipeHeartbeat     = time.Minute
 )
 
 // MinSize suppresses the bar for downloads smaller than this; their
@@ -43,6 +56,13 @@ type Bar struct {
 	active   bool
 	rendered bool
 	finished bool
+	// tty selects live \r redraws. When output is piped (docker logs,
+	// Pterodactyl panel), only \n-terminated milestone lines stream live.
+	tty           bool
+	nextMilestone int     // next percent boundary to print when piped
+	nextBytes     int64   // next byte boundary to print when piped & size unknown
+	lastWritten   int64   // bytes at the last piped render (heartbeat)
+	lastPct       float64 // percent shown by the last render (-1 when size unknown)
 }
 
 // New creates a Bar writing to stderr.
@@ -57,13 +77,31 @@ func NewTo(out io.Writer, label string, total int64) *Bar {
 		label = label[:maxLabelWidth-3] + "..."
 	}
 	return &Bar{
-		out:    out,
-		label:  label,
-		total:  total,
-		start:  time.Now(),
-		last:   time.Now(),
-		active: Enabled && out != nil && label != "",
+		out:           out,
+		label:         label,
+		total:         total,
+		start:         time.Now(),
+		last:          time.Now(),
+		active:        Enabled && out != nil && label != "",
+		tty:           isTerminal(out),
+		nextMilestone: pipeMilestoneStep,
+		nextBytes:     pipeByteStep,
 	}
+}
+
+// isTerminal reports whether w is a character device (a real terminal).
+// Anything else — pipes, files, buffers, the Docker log driver — only
+// streams newline-terminated lines, so the bar degrades to milestones.
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	st, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return st.Mode()&os.ModeCharDevice != 0
 }
 
 // ResumeFrom presets already-downloaded bytes (a resumed Range request), so
@@ -82,10 +120,47 @@ func (b *Bar) Write(p []byte) (int, error) {
 		return n, nil
 	}
 	b.written += int64(n)
-	if time.Since(b.last) >= refreshInterval {
+	if b.tty {
+		if time.Since(b.last) >= refreshInterval {
+			b.render(false)
+		}
+	} else if b.pipeDue() {
 		b.render(false)
 	}
 	return n, nil
+}
+
+// pipeDue reports whether a piped milestone line is owed: a percent/byte
+// boundary was crossed, or a slow transfer has been silent for a heartbeat.
+// Downloads below MinSize never earn milestones; their start/finish log
+// lines are enough.
+func (b *Bar) pipeDue() bool {
+	if b.total > 0 && b.total < MinSize {
+		return false
+	}
+	if b.total > 0 {
+		if int(b.percent()) >= b.nextMilestone {
+			return true
+		}
+	} else if b.written >= b.nextBytes {
+		return true
+	}
+	return b.written > b.lastWritten && time.Since(b.last) >= pipeHeartbeat
+}
+
+// percent returns the current completion percentage (0-100).
+func (b *Bar) percent() float64 {
+	if b.total <= 0 {
+		return 0
+	}
+	p := float64(b.written) / float64(b.total) * 100
+	if p < 0 {
+		return 0
+	}
+	if p > 100 {
+		return 100
+	}
+	return p
 }
 
 // Finish renders the final 100% state (unless the download was too small to
@@ -102,17 +177,21 @@ func (b *Bar) Finish() {
 	if !b.rendered && size < MinSize {
 		return
 	}
+	if !b.tty && b.rendered && b.total > 0 && b.lastPct >= 100 {
+		return // final milestone already printed the 100% line
+	}
 	b.render(true)
 }
 
-// Abort ends the bar without a completion render (failed downloads). It only
-// emits a newline when a partial bar is on screen.
+// Abort ends the bar without a completion render (failed downloads). On a
+// TTY it terminates the partial line; piped milestones are already complete
+// lines, so it stays silent there.
 func (b *Bar) Abort() {
 	if !b.active || b.finished {
 		return
 	}
 	b.finished = true
-	if b.rendered {
+	if b.tty && b.rendered {
 		fmt.Fprintln(b.out)
 	}
 }
@@ -125,7 +204,10 @@ func (b *Bar) render(final bool) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("\r  ")
+	if b.tty {
+		sb.WriteString("\r")
+	}
+	sb.WriteString("  ")
 	sb.WriteString(b.label)
 	sb.WriteString(" ")
 	if b.total > 0 {
@@ -147,13 +229,21 @@ func (b *Bar) render(final bool) {
 			fmt.Fprintf(&sb, " (%s)", speed)
 		}
 	}
-	if final {
+	if final || !b.tty {
 		sb.WriteString("\n")
 	}
 	fmt.Fprint(b.out, sb.String())
 	b.last = time.Now()
 	b.frames++
 	b.rendered = true
+	b.lastWritten = b.written
+	if b.total > 0 {
+		b.lastPct = b.percent()
+		b.nextMilestone = int(b.percent()) + pipeMilestoneStep
+	} else {
+		b.lastPct = -1
+		b.nextBytes = b.written + pipeByteStep
+	}
 }
 
 // barString draws a fixed-width ASCII bar for frac in [0, 1].

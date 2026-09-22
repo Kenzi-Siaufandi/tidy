@@ -35,6 +35,7 @@ Single static Go CLI (`main.go` only entrypoint). Flow: git sync → load `tidy.
 - Templates: missing env var leaves `{{VAR}}` in place + prints warning, not fatal. Writes are atomic (temp file + rename, preserves mode).
 - Storage: `extract` downloads to `.tidy/<name>.archive.tmp`, extracts, deletes tmp, then removes stale `session.lock` under dest.
 - Modrinth: requires `User-Agent` (default from `version.Version`, override via `MODRINTH_USER_AGENT`); picks `primary` file, prefers `sha512` > `sha256` > `sha1`, then always computes local SHA-256 and enforces `sha256` pin if set. Pinned `version` resolves via direct endpoint with list-scan fallback and enforces `game_version` when set (loader not enforced: bukkit jars run on paper); `version="latest"` (default) uses server-side `game_versions`/`loaders` filters + `channel` policy and errors when nothing matches. Latest update checks compare resolved version ID in state, not the `"latest"` string.
+- Progress (`internal/progress`, gated by `progress.Enabled`, `--no-progress` opts out): live `\r` bar on a TTY, `\n` milestone lines every 5% + 1/min heartbeat when piped — Docker/panel only forward newline-terminated lines, so `\r` output looks stuck until the container stops.
 
 ## Artifacts / CI
 

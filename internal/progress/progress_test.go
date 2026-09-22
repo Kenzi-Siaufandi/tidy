@@ -4,6 +4,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func withEnabled(t *testing.T, enabled bool, minSize int64) {
@@ -110,5 +111,83 @@ func TestBarLongLabelTruncated(t *testing.T) {
 	bar := NewTo(io.Discard, strings.Repeat("a", 100), 10)
 	if len(bar.label) > maxLabelWidth {
 		t.Errorf("label not truncated: %q", bar.label)
+	}
+}
+
+func TestBarPipeMilestonesStreamLive(t *testing.T) {
+	withEnabled(t, true, 0)
+	var buf strings.Builder
+	bar := NewTo(&buf, "panel.jar", 100)
+	if bar.tty {
+		t.Fatal("buffer output should use piped milestone mode, not TTY")
+	}
+	for i := 0; i < 4; i++ {
+		if _, err := bar.Write(make([]byte, 5)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := buf.String()
+	if strings.Contains(out, "\r") {
+		t.Errorf("piped milestones must not contain carriage returns, got %q", out)
+	}
+	if got := strings.Count(out, "\n"); got != 4 {
+		t.Errorf("expected 4 milestone lines, got %d: %q", got, out)
+	}
+	if !strings.Contains(out, "20%") {
+		t.Errorf("expected last milestone at 20%%, got %q", out)
+	}
+}
+
+func TestBarPipeHeartbeat(t *testing.T) {
+	withEnabled(t, true, 0)
+	var buf strings.Builder
+	bar := NewTo(&buf, "slow.jar", 1000)
+	if _, err := bar.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("expected silence before first milestone, got %q", buf.String())
+	}
+	bar.last = bar.last.Add(-2 * pipeHeartbeat)
+	if _, err := bar.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() == 0 {
+		t.Error("expected a heartbeat line after a minute of trickling bytes")
+	}
+}
+
+func TestBarTTYRedrawsInPlace(t *testing.T) {
+	withEnabled(t, true, 0)
+	var buf strings.Builder
+	bar := NewTo(&buf, "term.jar", 100)
+	bar.tty = true // simulate a real terminal
+	if _, err := bar.Write(make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("expected throttled silence, got %q", buf.String())
+	}
+	bar.last = bar.last.Add(-time.Hour)
+	if _, err := bar.Write(make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.HasPrefix(out, "\r") || strings.Contains(out, "\n") {
+		t.Errorf("expected a \\r redraw without newline, got %q", out)
+	}
+}
+
+func TestBarAbortPipeStaysSilent(t *testing.T) {
+	withEnabled(t, true, 0)
+	var buf strings.Builder
+	bar := NewTo(&buf, "fail.jar", 100)
+	if _, err := bar.Write(make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	before := buf.Len()
+	bar.Abort()
+	if buf.Len() != before {
+		t.Errorf("abort must not emit stray lines in piped mode, got %q", buf.String()[before:])
 	}
 }
