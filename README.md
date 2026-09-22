@@ -26,6 +26,44 @@ Tidy synchronizes declarative server configurations from Git, reconciles changes
   - Automatically detects and removes stale `session.lock` files left over from unclean container terminations.
 - **Mustache Config Templating**: Scans `.yml`, `.yaml`, `.properties`, `.json`, `.conf`, `.toml`, `.txt`, `.cfg`, `.env` files and replaces `{{VAR_NAME}}` placeholders with container environment variables (e.g. `{{DB_HOST}}`, `{{DB_PASSWORD}}`). Skips `.git`, `.tidy`, and `cache` directories. Honors `[templates] paths` globs when set.
 - **State Tracking**: Writes `.tidy/state.json` recording installed artifacts, commit SHAs, and SHA-256 hashes across container boots.
+- **Setup Helper (`tidy setup`)**: Zero-dependency Git onboarding ported from `tidy-git.py` — no Python needed. `init` writes an optimized `.gitignore`/`.gitattributes`, `status` lists trackable configs vs ignored worlds/JARs/databases, `check` audits for forbidden tracked files (report-only; suggests `git rm --cached` fixes).
+
+---
+
+## Setup Helper
+
+Prepare a server directory for Git-backed configs before first sync:
+
+```bash
+tidy setup init                # git init + write .gitignore/.gitattributes
+tidy setup status              # list detectable configs and ignored files
+tidy setup check               # audit: fail if worlds/JARs/DBs are tracked
+
+tidy setup init --force --workdir /path/to/server
+```
+
+### Packing a world template
+
+`pack-world` copies a world, strips player data (`playerdata/`, `stats/`,
+`advancements/`, `session.lock`, `uid.dat`), and writes a tidy-compatible
+archive. The live world is never modified. Output includes the SHA-256 and a
+ready-to-paste `[worlds.*]` snippet. Stop the server first so region files are
+consistent.
+
+```bash
+tidy setup pack-world --world world --output hub-world-v1.tar.gz
+tidy setup pack-world --world world_nether --output nether.zip --format zip
+```
+
+### Creating tidy.toml
+
+`new` is an interactive wizard: asks for the server (project/version/build),
+then loops over plugins (modrinth or url, Enter skips/finishes). Output is
+validated before writing and never overwrites without `--force`.
+
+```bash
+tidy setup new --workdir /path/to/server
+```
 
 ---
 

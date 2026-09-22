@@ -14,6 +14,7 @@ import (
 	"github.com/Kenzi-Siaufandi/tidy/internal/git"
 	"github.com/Kenzi-Siaufandi/tidy/internal/jarlink"
 	"github.com/Kenzi-Siaufandi/tidy/internal/resolver"
+	"github.com/Kenzi-Siaufandi/tidy/internal/setup"
 	"github.com/Kenzi-Siaufandi/tidy/internal/state"
 	"github.com/Kenzi-Siaufandi/tidy/internal/storage"
 	"github.com/Kenzi-Siaufandi/tidy/internal/templating"
@@ -24,6 +25,9 @@ import (
 const Version = version.Version
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "setup" {
+		os.Exit(setup.Run(os.Args[2:]))
+	}
 	var (
 		configFlag    = flag.String("config", "tidy.toml", "Path to tidy.toml configuration file")
 		workDirFlag   = flag.String("workdir", ".", "Working directory for Minecraft server root")
