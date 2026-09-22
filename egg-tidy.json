@@ -87,6 +87,96 @@
             "user_editable": true,
             "rules": "nullable|string",
             "field_type": "text"
+        },
+        {
+            "name": "Database Host",
+            "description": "MySQL/MariaDB host for {{DB_HOST}} placeholders in plugin configs. Leave empty if unused.",
+            "env_variable": "DB_HOST",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "Database Port",
+            "description": "MySQL/MariaDB port for {{DB_PORT}} placeholders.",
+            "env_variable": "DB_PORT",
+            "default_value": "3306",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:16",
+            "field_type": "text"
+        },
+        {
+            "name": "Database Name",
+            "description": "Database/schema name for {{DB_NAME}} placeholders.",
+            "env_variable": "DB_NAME",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:128",
+            "field_type": "text"
+        },
+        {
+            "name": "Database User",
+            "description": "Database username for {{DB_USER}} placeholders.",
+            "env_variable": "DB_USER",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:128",
+            "field_type": "text"
+        },
+        {
+            "name": "Database Password",
+            "description": "Database password for {{DB_PASSWORD}} placeholders.",
+            "env_variable": "DB_PASSWORD",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "Redis Host",
+            "description": "Redis host for {{REDIS_HOST}} placeholders in plugin configs. Leave empty if unused.",
+            "env_variable": "REDIS_HOST",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "Redis Port",
+            "description": "Redis port for {{REDIS_PORT}} placeholders.",
+            "env_variable": "REDIS_PORT",
+            "default_value": "6379",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:16",
+            "field_type": "text"
+        },
+        {
+            "name": "Redis Password",
+            "description": "Redis password for {{REDIS_PASSWORD}} placeholders. Leave empty if Redis has no password.",
+            "env_variable": "REDIS_PASSWORD",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "Redis User",
+            "description": "Redis ACL username for {{REDIS_USER}} placeholders (Redis 6+). Leave empty to use the default user.",
+            "env_variable": "REDIS_USER",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:128",
+            "field_type": "text"
         }
     ]
 }
