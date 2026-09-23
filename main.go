@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/config"
-	"github.com/Kenzi-Siaufandi/tidy/internal/doctor"
 	"github.com/Kenzi-Siaufandi/tidy/internal/git"
 	"github.com/Kenzi-Siaufandi/tidy/internal/jarlink"
 	"github.com/Kenzi-Siaufandi/tidy/internal/progress"
@@ -249,7 +248,7 @@ func main() {
 			} else {
 				currentCommit = headCommit
 			}
-			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Git: Initial clone complete (HEAD: %s)", git.ShortSHA(currentCommit))))
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Git: Initial clone complete (HEAD: %s)", git.ShortSHA(currentCommit))))
 		} else {
 			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Git: Checking for upstream updates from %s (branch: %s)...", git.MaskURL(gitRepo), gitBranch)))
 			// Snapshot drift versus the remote before sync discards it, and
@@ -264,7 +263,7 @@ func main() {
 			currentCommit = pullRes.NewCommit
 
 			if pullRes.HasUpdates {
-				fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Git: Pulled %d new commits (%s..%s):",
+				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Git: Pulled %d new commits (%s..%s):",
 					len(pullRes.Commits), git.ShortSHA(pullRes.OldCommit), git.ShortSHA(pullRes.NewCommit))))
 				for _, cMsg := range pullRes.Commits {
 					fmt.Printf("    - %s\n", cMsg)
@@ -327,37 +326,30 @@ func main() {
 					activeServerBuildID = previousState.Server.BuildID
 					serverNeedsDownload = false
 				} else if upstreamBuildID == previousState.Server.BuildID && previousState.Server.BuildID != 0 {
-					fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] Server: %s is up-to-date (build #%d, SHA-256 verified, skipped download)", previousState.Server.Filename, previousState.Server.BuildID)))
+					fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[=] Server: %s is up-to-date (build #%d, SHA-256 verified, skipped download)", previousState.Server.Filename, previousState.Server.BuildID)))
 					activeServerFilename = previousState.Server.Filename
 					activeServerSHA256 = previousState.Server.SHA256
 					activeServerBuildID = previousState.Server.BuildID
 					serverNeedsDownload = false
-				} else {
-					fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: New upstream build #%d available (local #%d). Updating...", upstreamBuildID, previousState.Server.BuildID)))
 				}
+				// A newer build falls through silently; the result prints below.
 			} else {
 				// Pinned build: skip only if stored build ID matches request.
 				if fmt.Sprintf("%d", previousState.Server.BuildID) == requestedBuild {
-					fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] Server: %s is up-to-date (SHA-256 verified, skipped download)", previousState.Server.Filename)))
+					fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[=] Server: %s is up-to-date (SHA-256 verified, skipped download)", previousState.Server.Filename)))
 					activeServerFilename = previousState.Server.Filename
 					activeServerSHA256 = previousState.Server.SHA256
 					activeServerBuildID = previousState.Server.BuildID
 					serverNeedsDownload = false
-				} else {
-					fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: Build changed (%d -> %s). Updating...", previousState.Server.BuildID, requestedBuild)))
 				}
+				// Build mismatch falls through silently; the result prints below.
 			}
-		} else {
-			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: %s is missing or checksum changed. Re-downloading...", previousState.Server.Filename)))
 		}
-	} else if previousState != nil && (previousState.Server.Project != cfg.Server.Project || previousState.Server.Version != cfg.Server.Version) {
-		fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: Version changed from %s %s to %s %s. Upgrading...",
-			previousState.Server.Project, previousState.Server.Version, cfg.Server.Project, cfg.Server.Version)))
-		// Old jar is removed only after the new download succeeds (see below).
+		// Missing/checksum-changed/version-changed fall through silently;
+		// the result prints below.
 	}
 
 	if serverNeedsDownload {
-		fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Server: Resolving %s %s (%s)...", cfg.Server.Project, cfg.Server.Version, serverResolver.Name())))
 		prevFilename := ""
 		if previousState != nil {
 			prevFilename = previousState.Server.Filename
@@ -367,7 +359,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to resolve/download server software: %v", err)))
 			os.Exit(1)
 		}
-		fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Server: Downloaded %s (Build #%d, SHA256: %s, %d bytes)",
+		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Server: Downloaded %s (Build #%d, SHA256: %s, %d bytes)",
 			serverRes.Filename, serverRes.BuildID, serverRes.SHA256[:12]+"...", serverRes.Size)))
 		activeServerFilename = serverRes.Filename
 		activeServerSHA256 = serverRes.SHA256
@@ -383,7 +375,7 @@ func main() {
 	if linked, linkErr := jarlink.Sync(workDir, activeServerFilename, jarAlias); linkErr != nil {
 		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: failed to link %s -> %s: %v", jarAlias, activeServerFilename, linkErr)))
 	} else if linked != "" {
-		fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Server: Linked %s -> %s", linked, activeServerFilename)))
+		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Server: Linked %s -> %s", linked, activeServerFilename)))
 	}
 
 	// 4. Reconcile Plugins (Added, Updated, Removed, Unchanged with SHA-256)
@@ -486,12 +478,12 @@ func main() {
 					}
 					// Check local file existence and SHA-256
 					if oldP.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldP.SHA256) {
-						fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] Plugin [%s]: %s is up-to-date (SHA-256 verified, skipped download)", pluginName, oldP.Filename)))
+						fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[=] Plugin [%s]: %s is up-to-date (SHA-256 verified, skipped download)", pluginName, oldP.Filename)))
 						installedPlugins[pluginName] = oldP
 						continue
 					}
 				} else if configChanged {
-					fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Configuration changed, re-downloading (keeping old jar until success)...", pluginName)))
+					// Re-download runs silently below; only the result prints.
 				}
 				// NOTE: "latest" with unchanged config falls through to resolve
 				// upstream and update only when a new release exists.
@@ -500,14 +492,6 @@ func main() {
 
 		switch source {
 		case "modrinth":
-			descriptor := fmt.Sprintf("%s v%s", pCfg.ProjectID, pCfg.NormalizedVersion())
-			if isLatest {
-				if gv := pCfg.NormalizedGameVersion(); gv != "" {
-					descriptor = fmt.Sprintf("%s latest for MC %s (loader %s)", pCfg.ProjectID, gv, pCfg.NormalizedLoader())
-				} else {
-					descriptor = fmt.Sprintf("%s latest (loader %s)", pCfg.ProjectID, pCfg.NormalizedLoader())
-				}
-			}
 			storeModrinth := func(res *resolver.PluginDownloadResult) {
 				installedPlugins[pluginName] = state.PluginState{
 					Source:          "modrinth",
@@ -541,7 +525,6 @@ func main() {
 			// download when the upstream version ID matches state and the
 			// local jar still verifies.
 			if isLatest && !configChanged && oldPlugin != nil && strings.TrimSpace(oldPlugin.VersionID) != "" {
-				fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Checking for updates from Modrinth (%s)...", pluginName, descriptor)))
 				ver, file, resolveErr := modClient.Resolve(ctx, pCfg)
 				if resolveErr != nil {
 					fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to resolve plugin %q: %v", pluginName, resolveErr)))
@@ -550,44 +533,41 @@ func main() {
 				if ver.ID == oldPlugin.VersionID {
 					localPath := filepath.Join(workDir, "plugins", oldPlugin.Filename)
 					if oldPlugin.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldPlugin.SHA256) {
-						fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] Plugin [%s]: %s is up-to-date (latest %s verified, skipped download)", pluginName, oldPlugin.Filename, ver.VersionNumber)))
+						fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[=] Plugin [%s]: %s is up-to-date (latest %s verified, skipped download)", pluginName, oldPlugin.Filename, ver.VersionNumber)))
 						installedPlugins[pluginName] = *oldPlugin
 						continue
 					}
-				} else {
-					fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: New upstream release %s available (local %s). Updating...",
-						pluginName, ver.VersionNumber, oldPlugin.ResolvedVersion)))
 				}
+				// A new release (or failed local hash) falls through silently;
+				// the result prints below.
 				res, err := modClient.Download(ctx, pluginName, pCfg, workDir, ver, file)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
 					os.Exit(1)
 				}
-				fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Plugin [%s]: Saved %s (%s, SHA256: %s, %d bytes)",
+				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Saved %s (%s, SHA256: %s, %d bytes)",
 					pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
 				storeModrinth(res)
 				continue
 			}
 
-			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Resolving from Modrinth (%s)...", pluginName, descriptor)))
 			res, err := modClient.ResolveAndDownload(ctx, pluginName, pCfg, workDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
 				os.Exit(1)
 			}
-			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Plugin [%s]: Saved %s (%s, SHA256: %s, %d bytes)",
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Saved %s (%s, SHA256: %s, %d bytes)",
 				pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
 
 			storeModrinth(res)
 
 		case "url":
-			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Downloading from direct URL with mandatory SHA-256...", pluginName)))
 			res, err := resolver.ResolveAndDownloadURL(ctx, pluginName, pCfg, workDir, nil)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
 				os.Exit(1)
 			}
-			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Plugin [%s]: Saved %s (SHA256: %s, %d bytes)",
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Saved %s (SHA256: %s, %d bytes)",
 				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)))
 
 			installedPlugins[pluginName] = state.PluginState{
@@ -602,13 +582,12 @@ func main() {
 				_ = os.Remove(filepath.Join(workDir, "plugins", oldPlugin.Filename))
 			}
 		case "local":
-			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Plugin [%s]: Verifying manually-uploaded jar (%s) with mandatory SHA-256...", pluginName, strings.TrimSpace(pCfg.Path))))
 			res, err := resolver.VerifyLocalPlugin(pluginName, pCfg, workDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to verify local plugin %q: %v", pluginName, err)))
 				os.Exit(1)
 			}
-			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Plugin [%s]: Verified %s (SHA256: %s, %d bytes)",
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Verified %s (SHA256: %s, %d bytes)",
 				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)))
 
 			installedPlugins[pluginName] = state.PluginState{
@@ -651,13 +630,13 @@ func main() {
 			}
 
 			if syncRes.Skipped {
-				fmt.Printf("%s\n", ui.Gray(fmt.Sprintf("[=] World/File [%s]: %s (%s)", name, filepath.Base(syncRes.Path), syncRes.Reason)))
+				fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[=] World/File [%s]: %s (%s)", name, filepath.Base(syncRes.Path), syncRes.Reason)))
 			} else {
 				if syncRes.Extracted {
-					fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] World/File [%s]: Extracted %d files to %s (SHA-256 verified)",
+					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] World/File [%s]: Extracted %d files to %s (SHA-256 verified)",
 						name, syncRes.Files, fCfg.Path)))
 				} else {
-					fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] World/File [%s]: Saved to %s (SHA-256 verified)",
+					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] World/File [%s]: Saved to %s (SHA-256 verified)",
 						name, fCfg.Path)))
 				}
 			}
@@ -719,40 +698,6 @@ func main() {
 
 	if err := state.SaveState(workDir, currentState); err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Failed to save .tidy/state.json: %v", err)))
-	} else {
-		fmt.Println(ui.Green("[+] State: Saved updated state to .tidy/state.json"))
-	}
-
-	// 8. Doctor: surface runtime facts the panel console can't inspect
-	// (no shell there, only Minecraft input), so a silent java exit is debuggable.
-	if javaVer, err := doctor.JavaVersion(ctx, "java"); err != nil {
-		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Doctor: %v", err)))
-	} else {
-		fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Doctor: %s", javaVer)))
-	}
-	if jars, err := doctor.ListJars(workDir); err != nil {
-		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Doctor: failed to list jars: %v", err)))
-	} else {
-		found := false
-		for _, j := range jars {
-			if j.Name != activeServerFilename {
-				continue
-			}
-			found = true
-			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Doctor: jar %s (%d bytes)", j.Name, j.Size)))
-			break
-		}
-		if !found {
-			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: Doctor: no server jar %s found in workdir", activeServerFilename)))
-		}
-	}
-	switch doctor.EulaStatus(workDir) {
-	case "ok":
-		fmt.Printf("%s\n", ui.Cyan("[*] Doctor: eula.txt accepted"))
-	case "missing":
-		fmt.Printf("%s\n", ui.Yellow("[!] Warning: Doctor: eula.txt missing (server will exit); reinstall or add eula=true"))
-	default:
-		fmt.Printf("%s\n", ui.Yellow("[!] Warning: Doctor: eula.txt present but eula!=true (server will exit)"))
 	}
 
 	fmt.Println(ui.Bold("=================================================================="))
