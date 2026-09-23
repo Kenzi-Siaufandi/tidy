@@ -60,4 +60,6 @@ jobs:
           files: |
             tidy-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
             tidy-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}.sha256
-          generate_release_notes: true
+          # Only one matrix leg may generate notes; every leg uploading
+          # with this set to true appends a duplicate "Full Changelog".
+          generate_release_notes: ${{ matrix.goos == 'linux' && matrix.goarch == 'amd64' }}
