@@ -75,6 +75,10 @@ Thumbs.db
 .idea/
 .vscode/
 
+# --- Secrets & Private Keys (never commit) ---
+*.key
+*.pem
+
 # --- Tidy Runtime State (never commit local sync state) ---
 .tidy/
 `
