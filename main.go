@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -65,6 +66,36 @@ func uniqueDriftReportName(workDir string, now time.Time) string {
 	}
 }
 
+// volatileDateComment matches the timestamp line java.util.Properties.store()
+// rewrites atop server.properties on every save, e.g.
+// "#Sun Sep 20 14:03:06 WIB 2026". It changes on every boot with no real
+// config change, so drift detection ignores it (vanilla behavior, not
+// Pterodactyl — and no server option disables it).
+var volatileDateComment = regexp.MustCompile(`^#[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}:\d{2} \S+ \d{4}$`)
+
+// hasRealDiff reports whether a unified diff contains any change beyond
+// volatile date comments. Headers (+++ / --- / @@ / diff --git / index) and
+// context lines never count; a binary-change marker always counts.
+func hasRealDiff(diff string) bool {
+	for _, l := range strings.Split(diff, "\n") {
+		switch {
+		case l == "",
+			strings.HasPrefix(l, "+++"), strings.HasPrefix(l, "---"),
+			strings.HasPrefix(l, "@@"), strings.HasPrefix(l, "diff --git"),
+			strings.HasPrefix(l, "index "):
+			continue
+		case strings.HasPrefix(l, "Binary files "):
+			return true
+		case strings.HasPrefix(l, "+") || strings.HasPrefix(l, "-"):
+			if volatileDateComment.MatchString(strings.TrimSpace(l[1:])) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // isTidyInternal reports whether a repo-relative path is Tidy's own runtime
 // state (.tidy/). Those files exist only locally and never on the remote, so
 // they are pollution in a drift report, not drift.
@@ -94,10 +125,25 @@ func reportDrift(ctx context.Context, gitClient *git.Client, workDir, configFlag
 		}
 	}
 	var modified []string
+	var churnSkipped int
+	diffs := make(map[string]string)
 	for _, p := range drift.Modified {
-		if !templated[p] && !isTidyInternal(p) {
-			modified = append(modified, p)
+		if templated[p] || isTidyInternal(p) {
+			continue
 		}
+		d, err := gitClient.DiffTracked(ctx, workDir, p)
+		if err != nil {
+			modified = append(modified, p)
+			continue
+		}
+		if !hasRealDiff(d) {
+			// Timestamp-only churn (e.g. the server.properties date
+			// header the server rewrites on every boot): not drift.
+			churnSkipped++
+			continue
+		}
+		modified = append(modified, p)
+		diffs[p] = d
 	}
 	var untracked []string
 	for _, p := range drift.Untracked {
@@ -108,21 +154,9 @@ func reportDrift(ctx context.Context, gitClient *git.Client, workDir, configFlag
 	if len(modified)+len(untracked) == 0 {
 		return
 	}
-	// Capture what the sync is about to discard while the evidence still
-	// exists. Best-effort per file: a failed diff must not lose the report.
-	diffs := make(map[string]string)
-	shown := modified
-	if len(shown) > driftDiffFilesCap {
-		shown = shown[:driftDiffFilesCap]
-	}
-	for _, p := range shown {
-		if d, err := gitClient.DiffTracked(ctx, workDir, p); err == nil {
-			diffs[p] = d
-		}
-	}
 	now := time.Now()
 	reportName := uniqueDriftReportName(workDir, now)
-	writeDriftReport(workDir, reportName, now, modified, untracked, diffs)
+	writeDriftReport(workDir, reportName, now, modified, untracked, diffs, churnSkipped)
 	if rel := configRelPath(workDir, configFlag); rel != "" {
 		for _, p := range modified {
 			if p == rel {
@@ -156,7 +190,7 @@ func configRelPath(workDir, configFlag string) string {
 // Timestamps are local so they match the panel console and the filename.
 // diffs holds per-file `git diff HEAD` output for troubleshooting what the
 // sync discarded; files without an entry render as "(diff unavailable)".
-func formatDriftReport(modified, untracked []string, diffs map[string]string, now time.Time) string {
+func formatDriftReport(modified, untracked []string, diffs map[string]string, churnSkipped int, now time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Tidy drift report — %s\n", now.Format("2006-01-02 15:04:05 -0700"))
 	b.WriteString("# Written before the git sync.\n")
@@ -164,6 +198,9 @@ func formatDriftReport(modified, untracked []string, diffs map[string]string, no
 	b.WriteString("# 'Kept' files are untracked: git left them alone, but the remote does not know them.\n")
 	b.WriteString("# Files templated ({{VAR}}) by the previous run are expected-dirty and hidden.\n")
 	b.WriteString("# Diffs below are what the sync discarded (unified diff vs HEAD).\n")
+	if churnSkipped > 0 {
+		fmt.Fprintf(&b, "# %d file(s) differed only by volatile date comments (e.g. the server.properties header) and were ignored.\n", churnSkipped)
+	}
 	writeDriftSection(&b, "Discarded on sync (tracked, locally modified)", modified)
 	writeDriftSection(&b, "Kept locally (untracked, not in git)", untracked)
 	writeDiffSection(&b, modified, diffs)
@@ -231,11 +268,11 @@ func writeDiffSection(b *strings.Builder, modified []string, diffs map[string]st
 }
 
 // writeDriftReport persists the dated drift report under .tidy. Best-effort.
-func writeDriftReport(workDir, reportName string, now time.Time, modified, untracked []string, diffs map[string]string) {
+func writeDriftReport(workDir, reportName string, now time.Time, modified, untracked []string, diffs map[string]string, churnSkipped int) {
 	if err := os.MkdirAll(filepath.Join(workDir, ".tidy"), 0755); err != nil {
 		return
 	}
-	content := formatDriftReport(modified, untracked, diffs, now)
+	content := formatDriftReport(modified, untracked, diffs, churnSkipped, now)
 	_ = os.WriteFile(filepath.Join(workDir, reportName), []byte(content), 0644)
 }
 

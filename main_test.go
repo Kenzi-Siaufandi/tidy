@@ -22,6 +22,7 @@ func TestFormatDriftReport_Sections(t *testing.T) {
 		map[string]string{
 			"tidy.toml": "diff --git a/tidy.toml b/tidy.toml\n-version = 1\n+version = 2\n",
 		},
+		1,
 		now,
 	)
 	for _, want := range []string{
@@ -38,6 +39,7 @@ func TestFormatDriftReport_Sections(t *testing.T) {
 		"-version = 1",
 		"+version = 2",
 		"(diff unavailable)",
+		"1 file(s) differed only by volatile date comments",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report missing %q:\n%s", want, out)
@@ -81,6 +83,37 @@ func TestUniqueDriftReportName_SameSecondCollision(t *testing.T) {
 	}
 }
 
+func TestHasRealDiff(t *testing.T) {
+	tests := []struct {
+		name string
+		diff string
+		want bool
+	}{
+		{"empty", "", false},
+		{"headers only", "diff --git a/f b/f\nindex abc..def 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n", false},
+		{
+			"timestamp-only churn",
+			"diff --git a/server.properties b/server.properties\n--- a/server.properties\n+++ b/server.properties\n@@ -1,2 +1,2 @@\n #Minecraft server properties\n-#Sun Sep 20 14:03:06 WIB 2026\n+#Wed Sep 23 09:00:00 WIB 2026\n motd=hi\n",
+			false,
+		},
+		{
+			"real value change",
+			"diff --git a/server.properties b/server.properties\n--- a/server.properties\n+++ b/server.properties\n@@ -1,3 +1,3 @@\n-#Sun Sep 20 14:03:06 WIB 2026\n+#Wed Sep 23 09:00:00 WIB 2026\n-motd=old\n+motd=new\n",
+			true,
+		},
+		{"comment line added", "diff --git a/f b/f\n+# just a comment\n", true},
+		{"binary change", "diff --git a/f.bin b/f.bin\nBinary files a/f.bin and b/f.bin differ\n", true},
+		{"context only", "diff --git a/f b/f\n key: value\n # note\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasRealDiff(tt.diff); got != tt.want {
+				t.Errorf("hasRealDiff = %v, want %v\ndiff:\n%s", got, tt.want, tt.diff)
+			}
+		})
+	}
+}
+
 func TestIsTidyInternal(t *testing.T) {
 	for _, p := range []string{".tidy", ".tidy/", ".tidy/state.json", ".tidy/drift-2026-09-23_05-30-24.txt", "./.tidy/state.json"} {
 		if !isTidyInternal(p) {
@@ -95,7 +128,7 @@ func TestIsTidyInternal(t *testing.T) {
 }
 
 func TestFormatDriftReport_Clean(t *testing.T) {
-	out := formatDriftReport(nil, nil, nil, time.Now())
+	out := formatDriftReport(nil, nil, nil, 0, time.Now())
 	if !strings.Contains(out, "Discarded on sync (tracked, locally modified) (0)") ||
 		!strings.Contains(out, "Kept locally (untracked, not in git) (0)") ||
 		!strings.Contains(out, "(none)") {
@@ -112,6 +145,7 @@ func TestFormatDriftReport_DiffTruncation(t *testing.T) {
 		[]string{"big.yml"},
 		nil,
 		map[string]string{"big.yml": sb.String()},
+		0,
 		time.Now(),
 	)
 	if !strings.Contains(out, "(... truncated, 10 more lines)") {
@@ -126,7 +160,7 @@ func TestFormatDriftReport_DiffTruncation(t *testing.T) {
 	for i := 0; i < driftDiffFilesCap+3; i++ {
 		many = append(many, fmt.Sprintf("f%d.yml", i))
 	}
-	out = formatDriftReport(many, nil, map[string]string{"f0.yml": "x\n"}, time.Now())
+	out = formatDriftReport(many, nil, map[string]string{"f0.yml": "x\n"}, 0, time.Now())
 	if !strings.Contains(out, "(and diffs for 3 more file(s) omitted)") {
 		t.Errorf("expected omitted-diffs note, got:\n%s", out)
 	}
@@ -140,7 +174,7 @@ func TestFormatDriftReport_CapsSections(t *testing.T) {
 	for i := 0; i < driftReportCap+5; i++ {
 		many = append(many, "file.yml")
 	}
-	out := formatDriftReport(many, nil, nil, time.Now())
+	out := formatDriftReport(many, nil, nil, 0, time.Now())
 	if !strings.Contains(out, "(and 5 more)") {
 		t.Errorf("expected overflow note, got:\n%s", out)
 	}
@@ -295,5 +329,74 @@ func TestReportDrift_CleanWritesNothing(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Errorf("clean runs must write no drift report, got %v", matches)
+	}
+}
+
+func TestReportDrift_TimestampOnlyChurnIgnored(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed, skipping test")
+	}
+
+	workDir := t.TempDir()
+	runCmd := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = workDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %s (%v)", args, string(out), err)
+		}
+	}
+	runCmd("init")
+	runCmd("config", "user.email", "test@test.com")
+	runCmd("config", "user.name", "Test User")
+	runCmd("checkout", "-b", "main")
+	props := "#Minecraft server properties\n#Sun Sep 20 14:03:06 WIB 2026\nmotd=hi\n"
+	if err := os.WriteFile(filepath.Join(workDir, "server.properties"), []byte(props), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd("add", "server.properties")
+	runCmd("commit", "-m", "initial")
+
+	// Simulate a server boot rewriting only the date header.
+	rebooted := "#Minecraft server properties\n#Wed Sep 23 09:00:00 WIB 2026\nmotd=hi\n"
+	if err := os.WriteFile(filepath.Join(workDir, "server.properties"), []byte(rebooted), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := git.NewClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportDrift(context.Background(), client, workDir, "server.properties", nil)
+
+	matches, err := filepath.Glob(filepath.Join(workDir, driftReportPrefix+"*.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("timestamp-only churn must write no drift report, got %v", matches)
+	}
+
+	// A real value change on top must still be reported.
+	edited := "#Minecraft server properties\n#Wed Sep 23 09:00:00 WIB 2026\nmotd=hello\n"
+	if err := os.WriteFile(filepath.Join(workDir, "server.properties"), []byte(edited), 0644); err != nil {
+		t.Fatal(err)
+	}
+	reportDrift(context.Background(), client, workDir, "server.properties", nil)
+
+	matches, err = filepath.Glob(filepath.Join(workDir, driftReportPrefix+"*.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 drift report for the real change, got %v", matches)
+	}
+	raw, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"-motd=hi", "+motd=hello"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("report missing %q:\n%s", want, raw)
+		}
 	}
 }
