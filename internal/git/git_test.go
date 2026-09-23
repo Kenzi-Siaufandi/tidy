@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -436,3 +437,47 @@ func TestGitClient_StatusDrift(t *testing.T) {
 	}
 }
 
+func TestGitClient_DiffTracked(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed, skipping test")
+	}
+
+	workDir := t.TempDir()
+	runCmd := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = workDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %s (%v)", args, string(out), err)
+		}
+	}
+	runCmd("init")
+	runCmd("config", "user.email", "test@test.com")
+	runCmd("config", "user.name", "Test User")
+	runCmd("checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(workDir, "server.properties"), []byte("motd=old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd("add", "server.properties")
+	runCmd("commit", "-m", "initial")
+
+	if err := os.WriteFile(filepath.Join(workDir, "server.properties"), []byte("motd=new\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := NewClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	diff, err := client.DiffTracked(context.Background(), workDir, "server.properties")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"-motd=old", "+motd=new"} {
+		if !strings.Contains(diff, want) {
+			t.Errorf("diff missing %q:\n%s", want, diff)
+		}
+	}
+	if _, err := client.DiffTracked(context.Background(), workDir, ""); err == nil {
+		t.Errorf("expected error for empty path")
+	}
+}

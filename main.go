@@ -33,6 +33,15 @@ const driftReportPrefix = ".tidy/drift-"
 // driftReportCap bounds each report section so messy servers stay readable.
 const driftReportCap = 50
 
+// driftDiffFilesCap bounds how many files get full diffs in a report. The
+// name lists above always cover every file; diffs are the troubleshooting
+// payload and the expensive part, so only the first N (sorted) are shown.
+const driftDiffFilesCap = 10
+
+// driftDiffLinesCap bounds each file's diff so one huge config can't flood
+// the panel disk (reports are never pruned).
+const driftDiffLinesCap = 80
+
 // driftReportName returns the report path for a run timestamp, e.g.
 // .tidy/drift-2026-09-23_05-30-24.txt. Hyphens keep it shell/panel-safe.
 func driftReportName(now time.Time) string {
@@ -99,9 +108,21 @@ func reportDrift(ctx context.Context, gitClient *git.Client, workDir, configFlag
 	if len(modified)+len(untracked) == 0 {
 		return
 	}
+	// Capture what the sync is about to discard while the evidence still
+	// exists. Best-effort per file: a failed diff must not lose the report.
+	diffs := make(map[string]string)
+	shown := modified
+	if len(shown) > driftDiffFilesCap {
+		shown = shown[:driftDiffFilesCap]
+	}
+	for _, p := range shown {
+		if d, err := gitClient.DiffTracked(ctx, workDir, p); err == nil {
+			diffs[p] = d
+		}
+	}
 	now := time.Now()
 	reportName := uniqueDriftReportName(workDir, now)
-	writeDriftReport(workDir, reportName, now, modified, untracked)
+	writeDriftReport(workDir, reportName, now, modified, untracked, diffs)
 	if rel := configRelPath(workDir, configFlag); rel != "" {
 		for _, p := range modified {
 			if p == rel {
@@ -133,15 +154,19 @@ func configRelPath(workDir, configFlag string) string {
 
 // formatDriftReport renders the panel-viewable drift report body.
 // Timestamps are local so they match the panel console and the filename.
-func formatDriftReport(modified, untracked []string, now time.Time) string {
+// diffs holds per-file `git diff HEAD` output for troubleshooting what the
+// sync discarded; files without an entry render as "(diff unavailable)".
+func formatDriftReport(modified, untracked []string, diffs map[string]string, now time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Tidy drift report — %s\n", now.Format("2006-01-02 15:04:05 -0700"))
 	b.WriteString("# Written before the git sync.\n")
 	b.WriteString("# 'Discarded' files are tracked and were reset (reset --hard): commit them to keep them.\n")
 	b.WriteString("# 'Kept' files are untracked: git left them alone, but the remote does not know them.\n")
 	b.WriteString("# Files templated ({{VAR}}) by the previous run are expected-dirty and hidden.\n")
+	b.WriteString("# Diffs below are what the sync discarded (unified diff vs HEAD).\n")
 	writeDriftSection(&b, "Discarded on sync (tracked, locally modified)", modified)
 	writeDriftSection(&b, "Kept locally (untracked, not in git)", untracked)
+	writeDiffSection(&b, modified, diffs)
 	return b.String()
 }
 
@@ -163,12 +188,54 @@ func writeDriftSection(b *strings.Builder, title string, paths []string) {
 	b.WriteString(extra)
 }
 
+// writeDiffSection renders the troubleshooting payload: what the sync
+// discarded, per tracked file. Only the first driftDiffFilesCap files get
+// diffs; each diff is capped at driftDiffLinesCap lines.
+func writeDiffSection(b *strings.Builder, modified []string, diffs map[string]string) {
+	fmt.Fprintf(b, "\n## Changes that will be lost (diff vs HEAD, first %d files)\n", driftDiffFilesCap)
+	if len(modified) == 0 {
+		b.WriteString("(none)\n")
+		return
+	}
+	shown := modified
+	if len(shown) > driftDiffFilesCap {
+		shown = shown[:driftDiffFilesCap]
+	}
+	for _, p := range shown {
+		fmt.Fprintf(b, "\n### %s\n", p)
+		d, ok := diffs[p]
+		if !ok {
+			b.WriteString("(diff unavailable)\n")
+			continue
+		}
+		d = strings.TrimRight(d, "\n")
+		if d == "" {
+			b.WriteString("(no textual diff)\n")
+			continue
+		}
+		lines := strings.Split(d, "\n")
+		if len(lines) > driftDiffLinesCap {
+			for _, l := range lines[:driftDiffLinesCap] {
+				b.WriteString(l + "\n")
+			}
+			fmt.Fprintf(b, "(... truncated, %d more lines)\n", len(lines)-driftDiffLinesCap)
+		} else {
+			for _, l := range lines {
+				b.WriteString(l + "\n")
+			}
+		}
+	}
+	if len(modified) > len(shown) {
+		fmt.Fprintf(b, "\n(and diffs for %d more file(s) omitted)\n", len(modified)-len(shown))
+	}
+}
+
 // writeDriftReport persists the dated drift report under .tidy. Best-effort.
-func writeDriftReport(workDir, reportName string, now time.Time, modified, untracked []string) {
+func writeDriftReport(workDir, reportName string, now time.Time, modified, untracked []string, diffs map[string]string) {
 	if err := os.MkdirAll(filepath.Join(workDir, ".tidy"), 0755); err != nil {
 		return
 	}
-	content := formatDriftReport(modified, untracked, now)
+	content := formatDriftReport(modified, untracked, diffs, now)
 	_ = os.WriteFile(filepath.Join(workDir, reportName), []byte(content), 0644)
 }
 

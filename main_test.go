@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,9 @@ func TestFormatDriftReport_Sections(t *testing.T) {
 	out := formatDriftReport(
 		[]string{"tidy.toml", "plugins/LuckPerms/config.yml"},
 		[]string{"plugins/MyPlugin/data.yml"},
+		map[string]string{
+			"tidy.toml": "diff --git a/tidy.toml b/tidy.toml\n-version = 1\n+version = 2\n",
+		},
 		now,
 	)
 	for _, want := range []string{
@@ -29,6 +33,11 @@ func TestFormatDriftReport_Sections(t *testing.T) {
 		"Kept locally (untracked, not in git) (1)",
 		"plugins/MyPlugin/data.yml",
 		"reset --hard",
+		"Changes that will be lost",
+		"### tidy.toml",
+		"-version = 1",
+		"+version = 2",
+		"(diff unavailable)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report missing %q:\n%s", want, out)
@@ -86,11 +95,43 @@ func TestIsTidyInternal(t *testing.T) {
 }
 
 func TestFormatDriftReport_Clean(t *testing.T) {
-	out := formatDriftReport(nil, nil, time.Now())
+	out := formatDriftReport(nil, nil, nil, time.Now())
 	if !strings.Contains(out, "Discarded on sync (tracked, locally modified) (0)") ||
 		!strings.Contains(out, "Kept locally (untracked, not in git) (0)") ||
 		!strings.Contains(out, "(none)") {
 		t.Errorf("clean report should show empty sections:\n%s", out)
+	}
+}
+
+func TestFormatDriftReport_DiffTruncation(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < driftDiffLinesCap+10; i++ {
+		fmt.Fprintf(&sb, " line %d\n", i)
+	}
+	out := formatDriftReport(
+		[]string{"big.yml"},
+		nil,
+		map[string]string{"big.yml": sb.String()},
+		time.Now(),
+	)
+	if !strings.Contains(out, "(... truncated, 10 more lines)") {
+		t.Errorf("expected truncation note, got:\n%s", out)
+	}
+	if strings.Contains(out, fmt.Sprintf("line %d", driftDiffLinesCap+10-1)) {
+		t.Errorf("lines past the cap must be cut:\n%s", out)
+	}
+
+	// More modified files than the diff cap: names list everything, diffs stop.
+	var many []string
+	for i := 0; i < driftDiffFilesCap+3; i++ {
+		many = append(many, fmt.Sprintf("f%d.yml", i))
+	}
+	out = formatDriftReport(many, nil, map[string]string{"f0.yml": "x\n"}, time.Now())
+	if !strings.Contains(out, "(and diffs for 3 more file(s) omitted)") {
+		t.Errorf("expected omitted-diffs note, got:\n%s", out)
+	}
+	if !strings.Contains(out, "f12.yml") {
+		t.Errorf("name list must still cover all files, got:\n%s", out)
 	}
 }
 
@@ -99,12 +140,14 @@ func TestFormatDriftReport_CapsSections(t *testing.T) {
 	for i := 0; i < driftReportCap+5; i++ {
 		many = append(many, "file.yml")
 	}
-	out := formatDriftReport(many, nil, time.Now())
+	out := formatDriftReport(many, nil, nil, time.Now())
 	if !strings.Contains(out, "(and 5 more)") {
 		t.Errorf("expected overflow note, got:\n%s", out)
 	}
-	if got := strings.Count(out, "file.yml"); got != driftReportCap {
-		t.Errorf("expected %d listed paths, got %d", driftReportCap, got)
+	// Name appears driftReportCap times in the capped name list plus once
+	// per diff header (driftDiffFilesCap, all unavailable here).
+	if got := strings.Count(out, "file.yml"); got != driftReportCap+driftDiffFilesCap {
+		t.Errorf("expected %d listed paths, got %d", driftReportCap+driftDiffFilesCap, got)
 	}
 }
 
@@ -202,7 +245,7 @@ func TestReportDrift_EndToEnd(t *testing.T) {
 		t.Fatalf("fresh report not found among %v", matches)
 	}
 	report := fresh
-	for _, want := range []string{"tidy.toml", "extra.yml", "Kept locally"} {
+	for _, want := range []string{"tidy.toml", "extra.yml", "Kept locally", "Changes that will be lost", "### tidy.toml", "-version = 1", "+version = 2"} {
 		if !strings.Contains(report, want) {
 			t.Errorf("report missing %q:\n%s", want, report)
 		}

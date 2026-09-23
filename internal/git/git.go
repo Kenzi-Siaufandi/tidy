@@ -251,6 +251,28 @@ func (c *Client) StatusDrift(ctx context.Context, dir string) (*DriftStatus, err
 	return parsePorcelainDrift(string(out)), nil
 }
 
+// DiffTracked returns the unified diff of a tracked file versus HEAD.
+// It is the troubleshooting payload for drift reports: the exact lines the
+// next sync will discard. Empty output means no textual difference (e.g. a
+// mode-only change, or a binary file git renders as "Binary files differ").
+// Callers cap the output before persisting; reports are never pruned.
+func (c *Client) DiffTracked(ctx context.Context, dir, relPath string) (string, error) {
+	relPath = filepath.ToSlash(strings.TrimSpace(relPath))
+	if relPath == "" {
+		return "", fmt.Errorf("file path cannot be empty")
+	}
+	cmd := exec.CommandContext(ctx, c.GitPath, "diff", "--no-color", "--no-ext-diff", "HEAD", "--", relPath)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git diff failed in %s: %w", dir, err)
+	}
+	if strings.IndexByte(string(out), 0) >= 0 {
+		return "", nil
+	}
+	return string(out), nil
+}
+
 // parsePorcelainDrift splits porcelain status output into tracked
 // modifications versus untracked files. Ignored ("!!") entries are skipped.
 // Rename entries ("R  old -> new") resolve to the new path; quoted paths
