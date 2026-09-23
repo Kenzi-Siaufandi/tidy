@@ -24,16 +24,52 @@ import (
 
 const Version = version.Version
 
-// driftReportName is the panel-viewable drift report inside .tidy.
-const driftReportName = ".tidy/drift-report.txt"
+// driftReportPrefix names the panel-viewable drift reports inside .tidy.
+// A file is written per drift event (clean runs write nothing) as
+// drift-YYYY-MM-DD_HH-MM-SS.txt, never pruned, so old reports remain
+// as history.
+const driftReportPrefix = ".tidy/drift-"
 
 // driftReportCap bounds each report section so messy servers stay readable.
 const driftReportCap = 50
 
-// reportDrift snapshots working-tree drift versus the git remote into
-// .tidy/drift-report.txt and warns on console. It runs before Pull's
+// driftReportName returns the report path for a run timestamp, e.g.
+// .tidy/drift-2026-09-23_05-30-24.txt. Hyphens keep it shell/panel-safe.
+func driftReportName(now time.Time) string {
+	return driftReportPrefix + now.Format("2006-01-02_15-04-05") + ".txt"
+}
+
+// uniqueDriftReportName keeps the agreed datetime format but avoids losing
+// history when two runs land in the same second (crash loops): the second
+// run gets drift-...-1.txt, then -2, and so on.
+func uniqueDriftReportName(workDir string, now time.Time) string {
+	base := driftReportName(now)
+	if _, err := os.Stat(filepath.Join(workDir, base)); os.IsNotExist(err) {
+		return base
+	}
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(base, driftReportPrefix), ".txt")
+	for i := 1; ; i++ {
+		candidate := fmt.Sprintf("%s%s-%d.txt", driftReportPrefix, trimmed, i)
+		if _, err := os.Stat(filepath.Join(workDir, candidate)); os.IsNotExist(err) {
+			return candidate
+		}
+	}
+}
+
+// isTidyInternal reports whether a repo-relative path is Tidy's own runtime
+// state (.tidy/). Those files exist only locally and never on the remote, so
+// they are pollution in a drift report, not drift.
+func isTidyInternal(p string) bool {
+	p = strings.TrimPrefix(p, "./")
+	return p == ".tidy" || strings.HasPrefix(p, ".tidy/")
+}
+
+// reportDrift snapshots working-tree drift versus the git remote into a
+// dated .tidy/drift-*.txt report and warns on console. It runs before Pull's
 // reset --hard, while the evidence still exists. Files substituted by the
-// previous run's templating are expected-dirty and filtered out.
+// previous run's templating are expected-dirty and filtered out. A report is
+// only written when drift exists, so clean boots leave no files behind and
+// history stays bounded to real events (never pruned).
 // Best-effort: never fails the boot.
 func reportDrift(ctx context.Context, gitClient *git.Client, workDir, configFlag string, previousState *state.State) {
 	drift, err := gitClient.StatusDrift(ctx, workDir)
@@ -50,14 +86,22 @@ func reportDrift(ctx context.Context, gitClient *git.Client, workDir, configFlag
 	}
 	var modified []string
 	for _, p := range drift.Modified {
-		if !templated[p] {
+		if !templated[p] && !isTidyInternal(p) {
 			modified = append(modified, p)
 		}
 	}
-	writeDriftReport(workDir, modified, drift.Untracked)
-	if len(modified)+len(drift.Untracked) == 0 {
+	var untracked []string
+	for _, p := range drift.Untracked {
+		if !isTidyInternal(p) {
+			untracked = append(untracked, p)
+		}
+	}
+	if len(modified)+len(untracked) == 0 {
 		return
 	}
+	now := time.Now()
+	reportName := uniqueDriftReportName(workDir, now)
+	writeDriftReport(workDir, reportName, now, modified, untracked)
 	if rel := configRelPath(workDir, configFlag); rel != "" {
 		for _, p := range modified {
 			if p == rel {
@@ -67,7 +111,7 @@ func reportDrift(ctx context.Context, gitClient *git.Client, workDir, configFlag
 		}
 	}
 	fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Git: %d file(s) differ from the remote — see %s",
-		len(modified)+len(drift.Untracked), driftReportName)))
+		len(modified)+len(untracked), reportName)))
 }
 
 // configRelPath returns the config path repo-relative in slash form, or ""
@@ -88,14 +132,16 @@ func configRelPath(workDir, configFlag string) string {
 }
 
 // formatDriftReport renders the panel-viewable drift report body.
+// Timestamps are local so they match the panel console and the filename.
 func formatDriftReport(modified, untracked []string, now time.Time) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Tidy drift report — %s\n", now.UTC().Format(time.RFC3339))
-	b.WriteString("# Local files differing from the git remote.\n")
-	b.WriteString("# Tracked modifications are DISCARDED on sync (reset --hard); commit them to keep them.\n")
-	b.WriteString("# Templated ({{VAR}}) substitutions from the last run are excluded.\n")
-	writeDriftSection(&b, "Modified vs remote", modified)
-	writeDriftSection(&b, "Untracked — not in remote", untracked)
+	fmt.Fprintf(&b, "# Tidy drift report — %s\n", now.Format("2006-01-02 15:04:05 -0700"))
+	b.WriteString("# Written before the git sync.\n")
+	b.WriteString("# 'Discarded' files are tracked and were reset (reset --hard): commit them to keep them.\n")
+	b.WriteString("# 'Kept' files are untracked: git left them alone, but the remote does not know them.\n")
+	b.WriteString("# Files templated ({{VAR}}) by the previous run are expected-dirty and hidden.\n")
+	writeDriftSection(&b, "Discarded on sync (tracked, locally modified)", modified)
+	writeDriftSection(&b, "Kept locally (untracked, not in git)", untracked)
 	return b.String()
 }
 
@@ -117,13 +163,13 @@ func writeDriftSection(b *strings.Builder, title string, paths []string) {
 	b.WriteString(extra)
 }
 
-// writeDriftReport persists the drift report under .tidy. Best-effort.
-func writeDriftReport(workDir string, modified, untracked []string) {
+// writeDriftReport persists the dated drift report under .tidy. Best-effort.
+func writeDriftReport(workDir, reportName string, now time.Time, modified, untracked []string) {
 	if err := os.MkdirAll(filepath.Join(workDir, ".tidy"), 0755); err != nil {
 		return
 	}
-	content := formatDriftReport(modified, untracked, time.Now())
-	_ = os.WriteFile(filepath.Join(workDir, driftReportName), []byte(content), 0644)
+	content := formatDriftReport(modified, untracked, now)
+	_ = os.WriteFile(filepath.Join(workDir, reportName), []byte(content), 0644)
 }
 
 func main() {
@@ -482,8 +528,6 @@ func main() {
 						installedPlugins[pluginName] = oldP
 						continue
 					}
-				} else if configChanged {
-					// Re-download runs silently below; only the result prints.
 				}
 				// NOTE: "latest" with unchanged config falls through to resolve
 				// upstream and update only when a new release exists.

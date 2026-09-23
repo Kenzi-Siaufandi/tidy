@@ -74,6 +74,9 @@ crash-reports/
 Thumbs.db
 .idea/
 .vscode/
+
+# --- Tidy Runtime State (never commit local sync state) ---
+.tidy/
 `
 
 // DefaultGitattributes normalizes config line endings to LF.

@@ -22,11 +22,11 @@ func TestFormatDriftReport_Sections(t *testing.T) {
 	)
 	for _, want := range []string{
 		"# Tidy drift report",
-		"2026-09-22T08:30:00Z",
-		"## Modified vs remote (2)",
+		"2026-09-22 08:30:00 +0000",
+		"Discarded on sync (tracked, locally modified) (2)",
 		"tidy.toml",
 		"plugins/LuckPerms/config.yml",
-		"## Untracked — not in remote (1)",
+		"Kept locally (untracked, not in git) (1)",
 		"plugins/MyPlugin/data.yml",
 		"reset --hard",
 	} {
@@ -36,9 +36,60 @@ func TestFormatDriftReport_Sections(t *testing.T) {
 	}
 }
 
+func TestDriftReportName_DatetimeNoPrune(t *testing.T) {
+	now := time.Date(2026, 9, 23, 5, 30, 24, 0, time.UTC)
+	want := ".tidy/drift-2026-09-23_05-30-24.txt"
+	if got := driftReportName(now); got != want {
+		t.Errorf("driftReportName = %q, want %q", got, want)
+	}
+	// Distinct timestamps get distinct names (history accumulates, never pruned).
+	other := driftReportName(now.Add(time.Second))
+	if other == want {
+		t.Errorf("expected a new filename per timestamp, got %q twice", other)
+	}
+	if !strings.HasPrefix(other, driftReportPrefix) {
+		t.Errorf("name %q must live under %q", other, driftReportPrefix)
+	}
+}
+
+func TestUniqueDriftReportName_SameSecondCollision(t *testing.T) {
+	workDir := t.TempDir()
+	now := time.Date(2026, 9, 23, 5, 30, 24, 0, time.UTC)
+	first := uniqueDriftReportName(workDir, now)
+	if first != ".tidy/drift-2026-09-23_05-30-24.txt" {
+		t.Fatalf("first name = %q, want base datetime name", first)
+	}
+	// Simulate a crash loop: base name already taken within the same second.
+	if err := os.MkdirAll(filepath.Join(workDir, ".tidy"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, first), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	second := uniqueDriftReportName(workDir, now)
+	if second != ".tidy/drift-2026-09-23_05-30-24-1.txt" {
+		t.Errorf("second name = %q, want -1 suffix", second)
+	}
+}
+
+func TestIsTidyInternal(t *testing.T) {
+	for _, p := range []string{".tidy", ".tidy/", ".tidy/state.json", ".tidy/drift-2026-09-23_05-30-24.txt", "./.tidy/state.json"} {
+		if !isTidyInternal(p) {
+			t.Errorf("isTidyInternal(%q) = false, want true", p)
+		}
+	}
+	for _, p := range []string{"tidy.toml", ".tidyrc", "plugins/.tidy/x.yml", "server.properties"} {
+		if isTidyInternal(p) {
+			t.Errorf("isTidyInternal(%q) = true, want false", p)
+		}
+	}
+}
+
 func TestFormatDriftReport_Clean(t *testing.T) {
 	out := formatDriftReport(nil, nil, time.Now())
-	if !strings.Contains(out, "## Modified vs remote (0)") || !strings.Contains(out, "(none)") {
+	if !strings.Contains(out, "Discarded on sync (tracked, locally modified) (0)") ||
+		!strings.Contains(out, "Kept locally (untracked, not in git) (0)") ||
+		!strings.Contains(out, "(none)") {
 		t.Errorf("clean report should show empty sections:\n%s", out)
 	}
 }
@@ -116,20 +167,90 @@ func TestReportDrift_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Pollute .tidy with runtime state from a previous run: it must never
+	// surface as drift.
+	if err := os.MkdirAll(filepath.Join(workDir, ".tidy"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(".tidy", "state.json"), "{}\n")
+	// Fixed ancient name: can never collide with the fresh report's timestamp.
+	write(filepath.Join(".tidy", "drift-2000-01-01_00-00-00.txt"), "old report\n")
+
 	prev := &state.State{TemplatedFiles: []string{"templated.yml"}}
 	reportDrift(context.Background(), client, workDir, "tidy.toml", prev)
 
-	raw, err := os.ReadFile(filepath.Join(workDir, driftReportName))
+	seeded := filepath.Join(workDir, ".tidy", "drift-2000-01-01_00-00-00.txt")
+	matches, err := filepath.Glob(filepath.Join(workDir, driftReportPrefix+"*.txt"))
 	if err != nil {
-		t.Fatalf("drift report was not written: %v", err)
+		t.Fatal(err)
 	}
-	report := string(raw)
-	for _, want := range []string{"tidy.toml", "extra.yml", "Untracked"} {
+	if len(matches) != 2 { // the seeded old report + the one just written
+		t.Fatalf("expected 2 dated drift reports, got %v", matches)
+	}
+	var fresh string
+	for _, m := range matches {
+		if m == seeded {
+			continue
+		}
+		raw, err := os.ReadFile(m)
+		if err != nil {
+			t.Fatalf("drift report was not written: %v", err)
+		}
+		fresh = string(raw)
+	}
+	if fresh == "" {
+		t.Fatalf("fresh report not found among %v", matches)
+	}
+	report := fresh
+	for _, want := range []string{"tidy.toml", "extra.yml", "Kept locally"} {
 		if !strings.Contains(report, want) {
 			t.Errorf("report missing %q:\n%s", want, report)
 		}
 	}
 	if strings.Contains(report, "templated.yml") {
 		t.Errorf("templated leftovers must be filtered out:\n%s", report)
+	}
+	for _, leaked := range []string{"state.json", "drift-2000-01-01_00-00-00.txt"} {
+		if strings.Contains(report, leaked) {
+			t.Errorf(".tidy/ runtime file %q must be filtered out:\n%s", leaked, report)
+		}
+	}
+}
+
+func TestReportDrift_CleanWritesNothing(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed, skipping test")
+	}
+
+	workDir := t.TempDir()
+	runCmd := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = workDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %s (%v)", args, string(out), err)
+		}
+	}
+	runCmd("init")
+	runCmd("config", "user.email", "test@test.com")
+	runCmd("config", "user.name", "Test User")
+	runCmd("checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(workDir, "tidy.toml"), []byte("version = 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd("add", "tidy.toml")
+	runCmd("commit", "-m", "initial")
+
+	client, err := git.NewClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportDrift(context.Background(), client, workDir, "tidy.toml", nil)
+
+	matches, err := filepath.Glob(filepath.Join(workDir, driftReportPrefix+"*.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("clean runs must write no drift report, got %v", matches)
 	}
 }
