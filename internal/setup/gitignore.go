@@ -42,6 +42,10 @@ cache/
 
 # --- Runtime Caches, Sessions & Ephemeral Files ---
 usercache.json
+ops.json
+whitelist.json
+banned-ips.json
+banned-players.json
 **/sessions/
 **/session/
 **/tmp/
