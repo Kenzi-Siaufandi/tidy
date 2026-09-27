@@ -22,10 +22,56 @@ export INTERNAL_IP
 # Switch to the container's working directory
 cd /home/container || exit 1
 
+# 0. Honor TIDY_VERSION at runtime. The baked /usr/local/bin/tidy floats with
+# the :java25 tag (latest main), and the Egg install script skips its own
+# TIDY_VERSION download when tidy is pre-installed — so a pin would otherwise
+# be silently ignored on every boot. A pinned version downloads that release
+# binary (sha256-verified) and runs it instead of the baked one.
+TIDY_BIN="$(command -v tidy 2>/dev/null || echo ./tidy)"
+WANT="${TIDY_VERSION:-latest}"
+if [ -n "${WANT}" ] && [ "${WANT}" != "latest" ]; then
+  case "${WANT}" in
+    v*) TAG="${WANT}" ;;
+    *) TAG="v${WANT}" ;;
+  esac
+  HAVE="$("${TIDY_BIN}" --version 2>/dev/null | grep -oE 'v[0-9][^[:space:]]*' | head -n 1 || true)"
+  if [ "${HAVE}" = "${TAG}" ]; then
+    echo "tidy ${TAG} (baked binary matches TIDY_VERSION)"
+  else
+    ARCH="$(uname -m)"
+    case "${ARCH}" in
+      x86_64|amd64) GOARCH=amd64 ;;
+      aarch64|arm64) GOARCH=arm64 ;;
+      *) echo "[!] Unsupported architecture: ${ARCH}"; exit 1 ;;
+    esac
+    PIN_URL="https://github.com/Kenzi-Siaufandi/tidy/releases/download/${TAG}/tidy-${TAG}-linux-${GOARCH}"
+    PIN_DEST="${TMPDIR:-/tmp}/tidy-${TAG}-linux-${GOARCH}"
+    if [ -x "${PIN_DEST}" ] && "${PIN_DEST}" --version 2>/dev/null | grep -q "${TAG}"; then
+      echo "tidy ${TAG} (reusing cached ${PIN_DEST})"
+    else
+      echo "TIDY_VERSION=${WANT}: downloading ${PIN_URL} ..."
+      if curl -fsSL -o "${PIN_DEST}" "${PIN_URL}" && curl -fsSL -o "${PIN_DEST}.sha256" "${PIN_URL}.sha256"; then
+        EXPECTED="$(cut -d ' ' -f 1 "${PIN_DEST}.sha256" | tr -d '\r\n')"
+        ACTUAL="$(sha256sum "${PIN_DEST}" | cut -d ' ' -f 1)"
+        rm -f "${PIN_DEST}.sha256"
+        if [ "${EXPECTED}" != "${ACTUAL}" ]; then
+          echo "[!] Checksum mismatch for tidy ${TAG}: expected ${EXPECTED}, got ${ACTUAL}"
+          rm -f "${PIN_DEST}"
+          exit 1
+        fi
+        chmod +x "${PIN_DEST}"
+      else
+        echo "[!] Failed to download tidy ${TAG}; refusing to fall back to latest"
+        rm -f "${PIN_DEST}" "${PIN_DEST}.sha256"
+        exit 1
+      fi
+    fi
+    TIDY_BIN="${PIN_DEST}"
+  fi
+fi
+
 # 1. Pre-flight via tidy (unless STARTUP already invokes it, for backwards compat
 # with old `tidy && ...` eggs — running it twice is only wasted time otherwise).
-TIDY_BIN="$(command -v tidy 2>/dev/null || echo ./tidy)"
-
 MODIFIED_STARTUP=$(echo -e "${STARTUP}" | sed -e 's/{{/${/g' -e 's/}}/}/g')
 TRIMMED="$(echo "${MODIFIED_STARTUP}" | sed -e 's/^[[:space:]]*//')"
 case "${TRIMMED}" in
