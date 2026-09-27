@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/config"
@@ -39,6 +40,49 @@ func TestManager_SkipExistingWorld(t *testing.T) {
 
 	if !res.Skipped {
 		t.Errorf("expected download to be skipped when world directory already exists")
+	}
+}
+
+func TestManager_RejectsPathTraversal(t *testing.T) {
+	tmpDir := t.TempDir()
+	mgr := NewManager(nil)
+	onceFalse := false
+	for _, p := range []string{"../escape", "../../etc/passwd", "/tmp/escape-absolute"} {
+		cfg := config.FileConfig{
+			Path:    p,
+			URL:     "https://example.com/world.tar.gz",
+			SHA256:  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			Extract: false,
+			Once:    &onceFalse,
+		}
+		if _, err := mgr.SyncFile(context.Background(), "evil", cfg, tmpDir); err == nil {
+			t.Errorf("expected traversal rejection for path %q, got nil", p)
+		}
+	}
+}
+
+func TestManager_AllowsAbsoluteInsideWorkdir(t *testing.T) {
+	tmpDir := t.TempDir()
+	inside := filepath.Join(tmpDir, "sub", "file.dat")
+	mgr := NewManager(nil)
+	onceFalse := false
+	// Use a test server so SyncFile would attempt download; we only check
+	// that containment passes by expecting a download error, not a
+	// containment error.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	cfg := config.FileConfig{
+		Path:    inside,
+		URL:     server.URL + "/missing",
+		SHA256:  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		Extract: false,
+		Once:    &onceFalse,
+	}
+	_, err := mgr.SyncFile(context.Background(), "inside", cfg, tmpDir)
+	if err == nil || strings.Contains(err.Error(), "must stay inside the workdir") {
+		t.Fatalf("absolute path inside workdir must not be rejected for containment: %v", err)
 	}
 }
 
