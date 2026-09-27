@@ -274,3 +274,15 @@ func TestModrinthClient_ResolveAndDownload_Latest(t *testing.T) {
 		t.Errorf("expected downloaded jar: %v", err)
 	}
 }
+
+func TestAllowVersionType_FailClosed(t *testing.T) {
+	if allowVersionType("", "release") {
+		t.Errorf("empty version_type must not pass release filter")
+	}
+	if isListed("") {
+		t.Errorf("empty status must not count as listed")
+	}
+	if !allowVersionType("release", "release") || !allowVersionType("beta", "beta") || !allowVersionType("alpha", "alpha") {
+		t.Errorf("explicit types must pass their channels")
+	}
+}

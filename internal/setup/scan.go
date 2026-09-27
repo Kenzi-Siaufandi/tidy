@@ -115,6 +115,8 @@ func isArchiveName(lower string) bool {
 }
 
 // ScanRepository walks root for trackable configs, pruning runtime directories.
+// Git ignore checks are batched into a single `git check-ignore --stdin`
+// invocation instead of one git process per file.
 func ScanRepository(root string) (*ScanResult, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
@@ -127,6 +129,12 @@ func ScanRepository(root string) (*ScanResult, error) {
 		return res, err
 	}
 
+	type candidate struct {
+		full string
+		cur  string
+		rel  string
+	}
+	var candidates []candidate
 	var walk func(cur string) error
 	walk = func(cur string) error {
 		dirEntries, err := os.ReadDir(cur)
@@ -184,8 +192,6 @@ func ScanRepository(root string) (*ScanResult, error) {
 			if err != nil {
 				continue
 			}
-			// Prune directories discovered late (e.g. nested ignored dir
-			// reached via a non-ignored parent name).
 			pruned := false
 			for _, part := range relDirParts {
 				if IgnoredDirectories[part] {
@@ -206,35 +212,48 @@ func ScanRepository(root string) (*ScanResult, error) {
 				res.Ignored.OtherIgnored++
 				continue
 			}
-			if IsGitIgnored(absRoot, full) {
-				res.Ignored.OtherIgnored++
-				continue
-			}
-
-			switch {
-			case cur == absRoot || cur == filepath.Join(absRoot, "config"):
-				res.RootConfigs = append(res.RootConfigs, full)
-			case strings.HasPrefix(full, pluginsDir+string(os.PathSeparator)):
-				relPlugins, err := filepath.Rel(pluginsDir, full)
-				if err != nil {
-					res.RootConfigs = append(res.RootConfigs, full)
-					continue
-				}
-				parts := strings.Split(relPlugins, string(os.PathSeparator))
-				if len(parts) == 0 || parts[0] == "" {
-					res.RootConfigs = append(res.RootConfigs, full)
-					continue
-				}
-				res.PluginConfigs[parts[0]] = append(res.PluginConfigs[parts[0]], full)
-			default:
-				res.RootConfigs = append(res.RootConfigs, full)
-			}
+			candidates = append(candidates, candidate{full: full, cur: cur, rel: filepath.ToSlash(rel)})
 		}
 		return nil
 	}
 
 	if err := walk(absRoot); err != nil {
 		return res, err
+	}
+
+	// Single batched git ignore query for all candidates.
+	ignored := map[string]bool{}
+	if len(candidates) > 0 {
+		rels := make([]string, 0, len(candidates))
+		for _, c := range candidates {
+			rels = append(rels, c.rel)
+		}
+		ignored = BatchIgnored(absRoot, rels)
+	}
+
+	for _, c := range candidates {
+		if ignored[c.rel] {
+			res.Ignored.OtherIgnored++
+			continue
+		}
+		switch {
+		case c.cur == absRoot || c.cur == filepath.Join(absRoot, "config"):
+			res.RootConfigs = append(res.RootConfigs, c.full)
+		case strings.HasPrefix(c.full, pluginsDir+string(os.PathSeparator)):
+			relPlugins, err := filepath.Rel(pluginsDir, c.full)
+			if err != nil {
+				res.RootConfigs = append(res.RootConfigs, c.full)
+				continue
+			}
+			parts := strings.Split(relPlugins, string(os.PathSeparator))
+			if len(parts) == 0 || parts[0] == "" {
+				res.RootConfigs = append(res.RootConfigs, c.full)
+				continue
+			}
+			res.PluginConfigs[parts[0]] = append(res.PluginConfigs[parts[0]], c.full)
+		default:
+			res.RootConfigs = append(res.RootConfigs, c.full)
+		}
 	}
 
 	sort.Strings(res.RootConfigs)

@@ -190,26 +190,27 @@ func (c *ModrinthClient) fetchPinnedVersion(ctx context.Context, projectID, pin 
 }
 
 // allowVersionType reports whether a version_type passes the channel filter.
-// Empty version_type (unrecognized payloads) is treated as release-compatible.
+// Fail-closed: empty or unrecognized version_type never passes, so a future
+// API payload cannot slip an untyped version into a filtered channel.
 func allowVersionType(versionType, channel string) bool {
 	t := strings.ToLower(strings.TrimSpace(versionType))
 	switch strings.ToLower(strings.TrimSpace(channel)) {
 	case "", "release":
-		return t == "" || t == "release"
+		return t == "release"
 	case "beta":
-		return t == "" || t == "release" || t == "beta"
+		return t == "release" || t == "beta"
 	case "alpha":
-		return true
+		return t == "release" || t == "beta" || t == "alpha"
 	default:
-		return t == "" || t == "release"
+		return t == "release"
 	}
 }
 
-// isListed reports whether a version is publicly listed. Empty status
-// (unrecognized payloads) is treated as listed.
+// isListed reports whether a version is publicly listed. Fail-closed: empty
+// or unrecognized statuses are rejected.
 func isListed(status string) bool {
 	s := strings.ToLower(strings.TrimSpace(status))
-	return s == "" || s == "listed"
+	return s == "listed"
 }
 
 // selectPrimaryFile picks the primary file, falling back to the first file.
@@ -244,28 +245,40 @@ func supportsGameVersion(ver *ModrinthVersion, gameVersion string) bool {
 	return false
 }
 
+// latestMaxPages bounds the paged "latest" scan. The API returns newest
+// first with server-side game_versions/loaders filters, but channel filtering
+// is client-side, so large projects may need several pages to find a release.
+const latestMaxPages = 5
+
 // resolveLatest returns the newest version matching the game_version/loader
-// filters and channel policy. The API returns newest first.
+// filters and channel policy. The API returns newest first; pagination
+// continues until a short page or a match so compatible releases beyond the
+// first window are still found.
 func (c *ModrinthClient) resolveLatest(ctx context.Context, pCfg config.PluginConfig) (*ModrinthVersion, *ModrinthFile, error) {
 	gameVersion := pCfg.NormalizedGameVersion()
 	loader := pCfg.NormalizedLoader()
 	channel := pCfg.NormalizedChannel()
 
-	versions, err := c.fetchVersions(ctx, pCfg.ProjectID, gameVersion, loader, latestFetchLimit, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	for i := range versions {
-		v := &versions[i]
-		if !isListed(v.Status) || !allowVersionType(v.VersionType, channel) {
-			continue
-		}
-		file, err := selectPrimaryFile(v)
+	for page := 0; page < latestMaxPages; page++ {
+		versions, err := c.fetchVersions(ctx, pCfg.ProjectID, gameVersion, loader, latestFetchLimit, page*latestFetchLimit)
 		if err != nil {
-			continue
+			return nil, nil, err
 		}
-		return v, file, nil
+
+		for i := range versions {
+			v := &versions[i]
+			if !isListed(v.Status) || !allowVersionType(v.VersionType, channel) {
+				continue
+			}
+			file, err := selectPrimaryFile(v)
+			if err != nil {
+				continue
+			}
+			return v, file, nil
+		}
+		if len(versions) < latestFetchLimit {
+			break
+		}
 	}
 
 	if strings.TrimSpace(gameVersion) != "" {

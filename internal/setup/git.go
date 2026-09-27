@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,6 +73,39 @@ func LsFiles(root string, extra ...string) []string {
 		}
 	}
 	return files
+}
+
+// BatchIgnored queries git check-ignore once for many repo-relative slash
+// paths, returning the ignored subset. One process replaces N per-file
+// check-ignore invocations during repository scans.
+func BatchIgnored(root string, slashRels []string) map[string]bool {
+	ignored := map[string]bool{}
+	if len(slashRels) == 0 || !IsGitRepo(root) {
+		return ignored
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		return ignored
+	}
+	cmd := exec.Command("git", "check-ignore", "--stdin")
+	cmd.Dir = root
+	cmd.Stdin = strings.NewReader(strings.Join(slashRels, "\n") + "\n")
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		// Exit 1 with empty output means nothing ignored; other errors
+		// fail open (treat as not ignored) to avoid dropping configs.
+		if _, ok := err.(*exec.ExitError); !ok {
+			return ignored
+		}
+	}
+	for _, line := range strings.Split(outBuf.String(), "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			ignored[p] = true
+			ignored[filepath.ToSlash(p)] = true
+		}
+	}
+	return ignored
 }
 
 // IsGitIgnored reports whether absPath is ignored via hardcoded rules or

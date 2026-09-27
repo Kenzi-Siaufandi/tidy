@@ -13,11 +13,11 @@ import (
 
 // Config represents the top-level tidy.toml specification.
 type Config struct {
-	Server    ServerConfig          `toml:"server"`
+	Server    ServerConfig            `toml:"server"`
 	Plugins   map[string]PluginConfig `toml:"plugins"`
-	Files     map[string]FileConfig `toml:"files"`
-	Worlds    map[string]FileConfig `toml:"worlds"`
-	Templates TemplateConfig        `toml:"templates"`
+	Files     map[string]FileConfig   `toml:"files"`
+	Worlds    map[string]FileConfig   `toml:"worlds"`
+	Templates TemplateConfig          `toml:"templates"`
 }
 
 // ServerConfig defines the server software jar configuration.
@@ -244,6 +244,9 @@ func (c *Config) Validate() error {
 			if err := validateSHA256Hex(sha); err != nil {
 				return fmt.Errorf("plugin %q: invalid 'sha256': %w", name, err)
 			}
+			p.URL = strings.TrimSpace(p.URL)
+			p.SHA256 = sha
+			c.Plugins[name] = p
 		case "github":
 			repo := strings.TrimSpace(p.Repo)
 			if repo == "" {

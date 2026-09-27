@@ -1,5 +1,5 @@
 # Stage 1: Build the static Tidy binary
-FROM golang:1.27.1-alpine AS builder
+FROM golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
 
 WORKDIR /build
 
@@ -12,7 +12,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /build/tidy main.go
 
 # Stage 2: Runtime image targeting Java 25 on Pterodactyl Yolks
-FROM ghcr.io/pterodactyl/yolks:java_25
+FROM ghcr.io/pterodactyl/yolks:java_25@sha256:0e5ec3cbe34a46b40f9a79c1ed0835cec34e23298ceb70083a8b04547a98a4de
 
 LABEL org.opencontainers.image.title="Tidy Orchestrator"
 LABEL org.opencontainers.image.description="Pterodactyl container image with Java 25, Git, and Tidy orchestrator"
