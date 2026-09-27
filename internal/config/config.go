@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -317,8 +318,17 @@ func (c *Config) Validate() error {
 	// Validate Files and Worlds (All must have mandatory SHA-256)
 	validateFileSection := func(sectionName string, items map[string]FileConfig) error {
 		for name, f := range items {
-			if strings.TrimSpace(f.Path) == "" {
+			rawPath := strings.TrimSpace(f.Path)
+			if rawPath == "" {
 				return fmt.Errorf("%s %q: 'path' destination directory or file path is required", sectionName, name)
+			}
+			if filepath.IsAbs(rawPath) {
+				return fmt.Errorf("%s %q: 'path' must be relative to the workdir, got absolute path %q", sectionName, name, f.Path)
+			}
+			for _, part := range strings.Split(filepath.ToSlash(rawPath), "/") {
+				if part == ".." {
+					return fmt.Errorf("%s %q: 'path' must not contain parent directory traversals (..)", sectionName, name)
+				}
 			}
 			if strings.TrimSpace(f.URL) == "" {
 				return fmt.Errorf("%s %q: 'url' is required", sectionName, name)

@@ -87,8 +87,7 @@ func TestParseConfig_FileValidation(t *testing.T) {
 	tests := []struct {
 		name string
 		raw  string
-	}{
-		{
+	}{		{
 			name: "files missing sha256",
 			raw: `
 [server]
@@ -134,6 +133,32 @@ version = "26.2"
 
 [files.test]
 path = "world"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+		{
+			name: "files absolute path",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[files.test]
+path = "/tmp/escape"
+url = "https://example.com/test.zip"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+		{
+			name: "worlds parent traversal",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[worlds.test]
+path = "../escape"
+url = "https://example.com/test.zip"
 sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 `,
 		},

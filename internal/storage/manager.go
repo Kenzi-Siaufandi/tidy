@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/config"
@@ -36,11 +37,39 @@ func NewManager(client *http.Client) *Manager {
 	return &Manager{HTTPClient: client}
 }
 
+// resolveDestPath resolves a [files.*]/[worlds.*] destination against workDir
+// and guarantees the result stays inside workDir. Absolute destinations are
+// allowed only when they resolve inside workDir; parent traversals escape and
+// are rejected, mirroring resolver.ResolveLocalPath.
+func resolveDestPath(workDir, configuredPath string) (string, error) {
+	raw := configuredPath
+	if raw == "" {
+		return "", fmt.Errorf("destination path cannot be empty")
+	}
+	workAbs, err := filepath.Abs(workDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve workdir: %w", err)
+	}
+	abs := raw
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(workAbs, raw)
+	}
+	abs = filepath.Clean(abs)
+	rel, err := filepath.Rel(workAbs, abs)
+	if err != nil {
+		return "", fmt.Errorf("destination path %q cannot be resolved: %w", configuredPath, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("destination path %q must stay inside the workdir", configuredPath)
+	}
+	return abs, nil
+}
+
 // SyncFile synchronizes a large file or world asset to the target destination.
 func (m *Manager) SyncFile(ctx context.Context, name string, fCfg config.FileConfig, workDir string) (*SyncResult, error) {
-	destPath := fCfg.Path
-	if !filepath.IsAbs(destPath) {
-		destPath = filepath.Join(workDir, destPath)
+	destPath, err := resolveDestPath(workDir, fCfg.Path)
+	if err != nil {
+		return nil, fmt.Errorf("file/world %q: %w", name, err)
 	}
 
 	if info, err := os.Stat(destPath); err == nil {
