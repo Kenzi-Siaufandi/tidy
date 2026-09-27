@@ -190,27 +190,27 @@ func (c *ModrinthClient) fetchPinnedVersion(ctx context.Context, projectID, pin 
 }
 
 // allowVersionType reports whether a version_type passes the channel filter.
-// Fail-closed: empty or unrecognized version_type never passes, so a future
-// API payload cannot slip an untyped version into a filtered channel.
+// Compat: empty version_type (unrecognized payloads) is treated as
+// release-compatible but callers log it. Unknown non-empty types fail closed.
 func allowVersionType(versionType, channel string) bool {
 	t := strings.ToLower(strings.TrimSpace(versionType))
 	switch strings.ToLower(strings.TrimSpace(channel)) {
 	case "", "release":
-		return t == "release"
+		return t == "" || t == "release"
 	case "beta":
-		return t == "release" || t == "beta"
+		return t == "" || t == "release" || t == "beta"
 	case "alpha":
-		return t == "release" || t == "beta" || t == "alpha"
+		return t == "" || t == "release" || t == "beta" || t == "alpha"
 	default:
-		return t == "release"
+		return t == "" || t == "release"
 	}
 }
 
-// isListed reports whether a version is publicly listed. Fail-closed: empty
-// or unrecognized statuses are rejected.
+// isListed reports whether a version is publicly listed. Compat: empty status
+// (unrecognized payloads) is treated as listed but callers log it.
 func isListed(status string) bool {
 	s := strings.ToLower(strings.TrimSpace(status))
-	return s == "listed"
+	return s == "" || s == "listed"
 }
 
 // selectPrimaryFile picks the primary file, falling back to the first file.
@@ -267,6 +267,9 @@ func (c *ModrinthClient) resolveLatest(ctx context.Context, pCfg config.PluginCo
 
 		for i := range versions {
 			v := &versions[i]
+			if strings.TrimSpace(v.Status) == "" || strings.TrimSpace(v.VersionType) == "" {
+				fmt.Fprintf(os.Stderr, "warning: Modrinth project %q version %q has empty status/type, allowing for compat\n", pCfg.ProjectID, v.VersionNumber)
+			}
 			if !isListed(v.Status) || !allowVersionType(v.VersionType, channel) {
 				continue
 			}

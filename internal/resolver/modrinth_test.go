@@ -275,14 +275,17 @@ func TestModrinthClient_ResolveAndDownload_Latest(t *testing.T) {
 	}
 }
 
-func TestAllowVersionType_FailClosed(t *testing.T) {
-	if allowVersionType("", "release") {
-		t.Errorf("empty version_type must not pass release filter")
+func TestAllowVersionType_Compat(t *testing.T) {
+	if !allowVersionType("", "release") {
+		t.Errorf("empty version_type must pass for compat")
 	}
-	if isListed("") {
-		t.Errorf("empty status must not count as listed")
+	if !isListed("") {
+		t.Errorf("empty status must count as listed for compat")
 	}
 	if !allowVersionType("release", "release") || !allowVersionType("beta", "beta") || !allowVersionType("alpha", "alpha") {
 		t.Errorf("explicit types must pass their channels")
+	}
+	if allowVersionType("unknown-type", "release") || isListed("draft") {
+		t.Errorf("unknown non-empty status/type must fail closed")
 	}
 }
