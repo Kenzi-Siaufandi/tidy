@@ -10,7 +10,7 @@
     "description": null,
     "features": null,
     "docker_images": {
-        "ghcr.io\/kenzi-siaufandi\/tidy:java25": "ghcr.io\/kenzi-siaufandi\/tidy:java25"
+        "ghcr.io/kenzi-siaufandi/tidy:java25": "ghcr.io/kenzi-siaufandi/tidy:java25"
     },
     "file_denylist": [],
     "startup": "java -Dname={{SERVER_IP}}:{{SERVER_PORT}} -XX:MaxRAM={{SERVER_MEMORY}}M {{FLAG}} -jar {{SERVER_JAR}}",
@@ -22,7 +22,7 @@
     },
     "scripts": {
         "installation": {
-            "script": "#!\/bin\/ash\r\n# Tidy Installation Script\r\n# Server Files Path: \/mnt\/server\r\n\r\nPROJECT=tidy\r\n\r\ncd \/mnt\/server\r\n\r\nif which tidy >\/dev\/null 2>&1; then\r\n    echo -e \"[\u2713] Tidy is already pre-installed in the container image!\"\r\nelse\r\n    # Fallback for standard Yolks images: download static binary\r\n    apk update && apk add --no-cache curl jq git\r\n    GITHUB_REPO=\"Kenzi-Siaufandi\/tidy\"\r\n\r\n    if [ \"${TIDY_VERSION}\" = \"latest\" ] || [ -z \"${TIDY_VERSION}\" ]; then\r\n        DOWNLOAD_URL=$(curl -s \"https:\/\/api.github.com\/repos\/${GITHUB_REPO}\/releases\/latest\" |\r\n            jq -r '.assets[] | select(.name==\"tidy\") | .browser_download_url')\r\n        if [ -z \"${DOWNLOAD_URL}\" ] || [ \"${DOWNLOAD_URL}\" = \"null\" ]; then\r\n            DOWNLOAD_URL=\"https:\/\/github.com\/${GITHUB_REPO}\/releases\/latest\/download\/tidy\"\r\n        fi\r\n    else\r\n        DOWNLOAD_URL=\"https:\/\/github.com\/${GITHUB_REPO}\/releases\/download\/${TIDY_VERSION}\/tidy\"\r\n    fi\r\n\r\n    echo -e \"Downloading Tidy from ${DOWNLOAD_URL}...\"\r\n    curl -sSL -o tidy \"${DOWNLOAD_URL}\" || echo -e \"[!] Note: Please upload the tidy binary manually if release is not yet published.\"\r\n\r\n    if [ -f tidy ]; then\r\n        chmod +x tidy\r\n        echo -e \"[\u2713] Tidy downloaded successfully!\"\r\n    fi\r\nfi",
+            "script": "#!/bin/ash\n# Tidy Installation Script\n# Server Files Path: /mnt/server\nset -eu\n\nPROJECT=tidy\n\ncd /mnt/server\n\nif which tidy >/dev/null 2>&1; then\n    echo \"[\u2713] Tidy is already pre-installed in the container image!\"\nelse\n    # Fallback for standard Yolks images: download static binary\n    apk update && apk add --no-cache curl jq git\n    GITHUB_REPO=\"Kenzi-Siaufandi/tidy\"\n\n    ARCH=\"$(uname -m)\"\n    case \"${ARCH}\" in\n        x86_64|amd64) GOARCH=amd64 ;;\n        aarch64|arm64) GOARCH=arm64 ;;\n        *) echo \"[!] Unsupported architecture: ${ARCH}\"; exit 1 ;;\n    esac\n    OS=\"$(uname -s | tr '[:upper:]' '[:lower:]')\"\n    case \"${OS}\" in\n        linux) GOOS=linux ;;\n        *) echo \"[!] Unsupported OS: ${OS} (only linux is supported)\"; exit 1 ;;\n    esac\n\n    CHECKSUM_URL=\"\"\n    if [ \"${TIDY_VERSION:-latest}\" = \"latest\" ] || [ -z \"${TIDY_VERSION:-}\" ]; then\n        echo \"Resolving latest tidy release for ${GOOS}/${GOARCH}...\"\n        RELEASE_JSON=\"$(curl -fsSL \"https://api.github.com/repos/${GITHUB_REPO}/releases/latest\")\"\n        DOWNLOAD_URL=\"$(printf '%s' \"${RELEASE_JSON}\" | jq -r --arg goos \"${GOOS}\" --arg goarch \"${GOARCH}\" '.assets[] | select(.name | test(\"tidy-.*-\" + $goos + \"-\" + $goarch + \"$\")) | .browser_download_url' | head -n 1)\"\n        CHECKSUM_URL=\"$(printf '%s' \"${RELEASE_JSON}\" | jq -r --arg goos \"${GOOS}\" --arg goarch \"${GOARCH}\" '.assets[] | select(.name | test(\"tidy-.*-\" + $goos + \"-\" + $goarch + \"\\\\.sha256$\")) | .browser_download_url' | head -n 1)\"\n    else\n        TAG=\"${TIDY_VERSION}\"\n        case \"${TAG}\" in\n            v*) ;;\n            *) TAG=\"v${TAG}\" ;;\n        esac\n        DOWNLOAD_URL=\"https://github.com/${GITHUB_REPO}/releases/download/${TAG}/tidy-${TAG}-${GOOS}-${GOARCH}\"\n        CHECKSUM_URL=\"${DOWNLOAD_URL}.sha256\"\n    fi\n\n    if [ -z \"${DOWNLOAD_URL:-}\" ] || [ \"${DOWNLOAD_URL}\" = \"null\" ]; then\n        echo \"[!] No matching tidy binary found for ${GOOS}/${GOARCH} (version: ${TIDY_VERSION:-latest})\"\n        exit 1\n    fi\n\n    echo \"Downloading Tidy from ${DOWNLOAD_URL}...\"\n    curl -fsSL -o tidy \"${DOWNLOAD_URL}\"\n\n    if [ -n \"${CHECKSUM_URL:-}\" ] && [ \"${CHECKSUM_URL}\" != \"null\" ]; then\n        echo \"Verifying checksum...\"\n        if curl -fsSL -o tidy.sha256 \"${CHECKSUM_URL}\"; then\n            EXPECTED=\"$(cut -d ' ' -f 1 tidy.sha256 | tr -d '\\r\\n')\"\n            ACTUAL=\"$(sha256sum tidy | cut -d ' ' -f 1)\"\n            rm -f tidy.sha256\n            if [ \"${EXPECTED}\" != \"${ACTUAL}\" ]; then\n                echo \"[!] Checksum mismatch: expected ${EXPECTED}, got ${ACTUAL}\"\n                rm -f tidy\n                exit 1\n            fi\n        else\n            echo \"[!] Warning: checksum file not found at ${CHECKSUM_URL}, skipping verification\"\n        fi\n    fi\n\n    chmod +x tidy\n    if ! ./tidy --version; then\n        echo \"[!] Downloaded tidy binary failed to run\"\n        rm -f tidy\n        exit 1\n    fi\n    echo \"[\u2713] Tidy downloaded successfully!\"\nfi\n",
             "container": "alpine:3.20",
             "entrypoint": "ash"
         }
@@ -30,12 +30,12 @@
     "variables": [
         {
             "name": "Git Repository",
-            "description": "",
+            "description": "Git repository URL for declarative configs. Leave empty to use local directory configs.",
             "env_variable": "GIT_REPO",
             "default_value": "",
             "user_viewable": true,
             "user_editable": true,
-            "rules": "required|string|max:64",
+            "rules": "nullable|string",
             "field_type": "text"
         },
         {
@@ -70,12 +70,12 @@
         },
         {
             "name": "Git Token",
-            "description": "",
+            "description": "Git token for private repos. Leave empty for public repos or local-only mode.",
             "env_variable": "GIT_TOKEN",
             "default_value": "",
             "user_viewable": true,
             "user_editable": true,
-            "rules": "required|string",
+            "rules": "nullable|string",
             "field_type": "text"
         },
         {
