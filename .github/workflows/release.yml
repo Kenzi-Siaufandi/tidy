@@ -14,7 +14,25 @@ permissions:
   contents: write
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    # Create the release first (with generated notes) so matrix legs only
+    # attach assets. Whichever matrix leg finishes first would otherwise
+    # create the release without notes, leaving the tag message as body.
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Create release with generated notes
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+
   build-and-upload:
+    needs: create-release
+    # Manual dispatches skip create-release (tags only); still build.
+    if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -60,6 +78,6 @@ jobs:
           files: |
             tidy-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
             tidy-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}.sha256
-          # Only one matrix leg may generate notes; every leg uploading
-          # with this set to true appends a duplicate "Full Changelog".
-          generate_release_notes: ${{ matrix.goos == 'linux' && matrix.goarch == 'amd64' }}
+          # Notes are generated once by create-release; legs only attach
+          # assets so parallel uploads can't create a notes-less release.
+          generate_release_notes: false
