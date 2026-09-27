@@ -2,57 +2,22 @@ name: Release Tidy CLI
 
 # Pushing a v* tag (e.g. v2.2.0) builds the CLI for every platform below
 # and attaches the binaries (+ .sha256 checksums) to the GitHub release.
-# Can also be run manually (workflow_dispatch) against any ref.
+# One job on purpose: the platforms are small static builds that share no
+# cross-compile cache, so a matrix only added a race between legs racing to
+# create the release. Sequential builds keep the release creation (and its
+# generated notes) to exactly one actor.
 
 on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  create-release:
+  release:
     runs-on: ubuntu-latest
-    # Create the release first (with generated notes) so matrix legs only
-    # attach assets. Whichever matrix leg finishes first would otherwise
-    # create the release without notes, leaving the tag message as body.
-    if: startsWith(github.ref, 'refs/tags/')
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Create release with generated notes
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-
-  build-and-upload:
-    needs: create-release
-    # Manual dispatches skip create-release (tags only); still build.
-    if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') }}
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            ext: ''
-          - goos: linux
-            goarch: arm64
-            ext: ''
-          - goos: darwin
-            goarch: amd64
-            ext: ''
-          - goos: darwin
-            goarch: arm64
-            ext: ''
-          - goos: windows
-            goarch: amd64
-            ext: '.exe'
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -62,22 +27,22 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build tidy CLI
+      - name: Build tidy CLI for every platform
         env:
           CGO_ENABLED: 0
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: go build -ldflags="-s -w" -o "tidy-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" main.go
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            ext=""
+            if [ "$goos" = "windows" ]; then ext=".exe"; fi
+            out="tidy-${{ github.ref_name }}-${goos}-${goarch}${ext}"
+            GOOS="$goos" GOARCH="$goarch" go build -ldflags="-s -w" -o "$out" main.go
+            sha256sum "$out" > "$out.sha256"
+          done
 
-      - name: Checksum binary
-        run: sha256sum "tidy-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" > "tidy-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}.sha256"
-
-      - name: Upload binary and checksum to release
+      - name: Upload binaries and checksums to release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            tidy-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
-            tidy-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}.sha256
-          # Notes are generated once by create-release; legs only attach
-          # assets so parallel uploads can't create a notes-less release.
-          generate_release_notes: false
+          generate_release_notes: true
+          files: tidy-${{ github.ref_name }}-*
