@@ -67,6 +67,30 @@ func TestMaskURL(t *testing.T) {
 	}
 }
 
+func TestStripURLCredentials(t *testing.T) {
+	if got := stripURLCredentials("https://token123@github.com/o/r.git"); got != "https://github.com/o/r.git" {
+		t.Errorf("strip token URL = %q", got)
+	}
+	if got := stripURLCredentials("https://user:pass@github.com/o/r.git"); got != "https://github.com/o/r.git" {
+		t.Errorf("strip user/pass URL = %q", got)
+	}
+	plain := "https://github.com/o/r.git"
+	if got := stripURLCredentials(plain); got != plain {
+		t.Errorf("plain URL must be unchanged, got %q", got)
+	}
+}
+
+func TestSanitizeGitError(t *testing.T) {
+	out := sanitizeGitError("fatal: https://user:secret@github.com/o/r.git not found", "secret")
+	if strings.Contains(out, "secret") || strings.Contains(out, "user:secret@") {
+		t.Errorf("token/URL creds leaked: %q", out)
+	}
+	out = sanitizeGitError("error for https://mytoken@github.com/o/r.git", "")
+	if strings.Contains(out, "mytoken@") {
+		t.Errorf("embedded URL creds must be redacted without token: %q", out)
+	}
+}
+
 func TestGitClient_CloneAndIncrementalPull(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed, skipping test")

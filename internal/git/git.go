@@ -187,11 +187,59 @@ func (c *Client) gitCmd(ctx context.Context, dir string, opts Options, args ...s
 	return cmd, cleanup, nil
 }
 
-// sanitizeGitError redacts any residual token from git stderr.
+// stripURLCredentials removes embedded userinfo (tokens, passwords) from a
+// remote URL so credentials never appear in argv (/proc/<pid>/cmdline) or
+// .git/config. Auth is supplied via GIT_ASKPASS instead.
+func stripURLCredentials(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.User == nil {
+		return rawURL
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return rawURL
+	}
+	u.User = nil
+	return u.String()
+}
+
+// sanitizeGitError redacts any residual token and embedded URL credentials
+// from git stderr so tokens never reach logs or the console.
 func sanitizeGitError(out string, token string) string {
 	out = strings.TrimSpace(out)
 	if token != "" {
 		out = strings.ReplaceAll(out, token, "******")
+	}
+	// Redact https://user:pass@host or https://token@host patterns even
+	// when the exact token value is unknown (e.g. token embedded in URL).
+	for _, prefix := range []string{"https://", "http://"} {
+		offset := 0
+		for offset < len(out) {
+			idx := strings.Index(out[offset:], prefix)
+			if idx < 0 {
+				break
+			}
+			start := offset + idx
+			atIdx := strings.Index(out[start+len(prefix):], "@")
+			if atIdx < 0 {
+				break
+			}
+			end := start + len(prefix) + atIdx + 1
+			segment := out[start:end]
+			if strings.ContainsAny(segment, " \t\n\r\"'") {
+				offset = end
+				continue
+			}
+			if segment == prefix+"******@" {
+				offset = end
+				continue
+			}
+			out = out[:start] + prefix + "******@" + out[end:]
+			offset = start + len(prefix) + len("******@")
+		}
 	}
 	return out
 }
@@ -350,7 +398,7 @@ func (c *Client) cloneInPlace(ctx context.Context, opts Options) error {
 	}
 
 	// 2. git remote add or set-url (always plain URL, no token)
-	plainURL := opts.RepoURL
+	plainURL := stripURLCredentials(opts.RepoURL)
 	remoteCmd := exec.CommandContext(ctx, c.GitPath, "remote", "add", "origin", plainURL)
 	remoteCmd.Dir = opts.TargetDir
 	stderr.Reset()
@@ -416,7 +464,7 @@ func (c *Client) Clone(ctx context.Context, opts Options) error {
 		"clone",
 		"--depth", "1",
 		"--branch", opts.Branch,
-		opts.RepoURL,
+		stripURLCredentials(opts.RepoURL),
 		opts.TargetDir,
 	}
 
@@ -434,7 +482,7 @@ func (c *Client) Clone(ctx context.Context, opts Options) error {
 		if strings.Contains(errOut, "already exists and is not an empty directory") {
 			return c.cloneInPlace(ctx, opts)
 		}
-		return fmt.Errorf("git clone failed for %s: %s (%w)", MaskURL(opts.RepoURL), sanitizeGitError(errOut, opts.Token), err)
+		return fmt.Errorf("git clone failed for %s: %s (%w)", MaskURL(stripURLCredentials(opts.RepoURL)), sanitizeGitError(errOut, opts.Token), err)
 	}
 
 	return nil
@@ -468,13 +516,16 @@ func (c *Client) Pull(ctx context.Context, opts Options) (*PullResult, error) {
 		return nil, err
 	}
 
-	// 2. Fetch updates (ASKPASS supplies token; remote URL stays clean)
-	fetchArgs := []string{"fetch", "--depth", "10"}
-	if opts.RepoURL != "" {
-		fetchArgs = append(fetchArgs, opts.RepoURL, branch)
-	} else {
-		fetchArgs = append(fetchArgs, "origin", branch)
+	// 2. Fetch updates via the stored origin remote (ASKPASS supplies the
+	// token; the remote URL stays clean). Never pass RepoURL on argv: it
+	// would expose the URL in /proc/<pid>/cmdline and risk persisting
+	// embedded credentials. Best-effort: scrub a legacy dirty origin URL.
+	if plain := stripURLCredentials(opts.RepoURL); plain != "" {
+		scrubCmd := exec.CommandContext(ctx, c.GitPath, "remote", "set-url", "origin", plain)
+		scrubCmd.Dir = opts.TargetDir
+		_ = scrubCmd.Run()
 	}
+	fetchArgs := []string{"fetch", "--depth", "10", "origin", branch}
 
 	fetchCmd, cleanup, err := c.gitCmd(ctx, opts.TargetDir, opts, fetchArgs...)
 	if err != nil {
