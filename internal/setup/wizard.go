@@ -23,13 +23,16 @@ type WizardServer struct {
 // WizardPlugin holds one [plugins.<name>] answer.
 type WizardPlugin struct {
 	Name        string
-	Source      string // "modrinth", "url", or "local"
+	Source      string // "modrinth", "url", "github", or "local"
 	ProjectID   string
 	Version     string
 	GameVersion string
 	Loader      string
 	Channel     string
 	URL         string
+	Repo        string
+	Tag         string
+	Asset       string
 	Path        string
 	SHA256      string
 }
@@ -81,6 +84,18 @@ func BuildTOML(spec WizardSpec) string {
 		if strings.EqualFold(strings.TrimSpace(p.Source), "local") {
 			b.WriteString("source = \"local\"\n")
 			b.WriteString("path = " + tomlString(p.Path) + "\n")
+			b.WriteString("sha256 = " + tomlString(strings.ToLower(strings.TrimSpace(p.SHA256))) + "\n")
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(p.Source), "github") {
+			b.WriteString("source = \"github\"\n")
+			b.WriteString("repo = " + tomlString(strings.TrimSpace(p.Repo)) + "\n")
+			tag := strings.TrimSpace(p.Tag)
+			if tag == "" {
+				tag = "latest"
+			}
+			b.WriteString("tag = " + tomlString(tag) + "\n")
+			b.WriteString("asset = " + tomlString(strings.TrimSpace(p.Asset)) + "\n")
 			b.WriteString("sha256 = " + tomlString(strings.ToLower(strings.TrimSpace(p.SHA256))) + "\n")
 			continue
 		}
@@ -177,8 +192,8 @@ func runWizard(p *prompter) WizardSpec {
 		if name == "" {
 			break
 		}
-		source := strings.ToLower(p.ask(fmt.Sprintf("Source for %q [modrinth/url/local]", name), "modrinth"))
-		if source != "url" && source != "modrinth" && source != "local" {
+		source := strings.ToLower(p.ask(fmt.Sprintf("Source for %q [modrinth/url/github/local]", name), "modrinth"))
+		if source != "url" && source != "modrinth" && source != "github" && source != "local" {
 			fmt.Fprintln(p.w, ui.Yellow("[!] Unknown source, using modrinth."))
 			source = "modrinth"
 		}
@@ -225,6 +240,34 @@ func runWizard(p *prompter) WizardSpec {
 				fmt.Fprintln(p.w, ui.Yellow("[!] Must be exactly 64 hex characters."))
 			}
 			if plugin.URL == "" {
+				continue
+			}
+		} else if source == "github" {
+			plugin.Repo = p.askRequired("GitHub repo [owner/repo]")
+			if plugin.Repo == "" {
+				fmt.Fprintln(p.w, ui.Yellow("[!] Skipped: repo is required for github plugins."))
+				continue
+			}
+			plugin.Tag = p.ask("Release tag [latest or pin]", "latest")
+			plugin.Asset = p.askRequired("Release asset filename (e.g. Vault.jar)")
+			if plugin.Asset == "" {
+				fmt.Fprintln(p.w, ui.Yellow("[!] Skipped: asset is required for github plugins."))
+				continue
+			}
+			for {
+				sha := p.ask("SHA-256 (64 hex chars)", "")
+				if sha == "" {
+					fmt.Fprintln(p.w, ui.Yellow("[!] Skipped: sha256 is required for github plugins."))
+					plugin.Asset = ""
+					break
+				}
+				if isHex64(strings.TrimSpace(sha)) {
+					plugin.SHA256 = sha
+					break
+				}
+				fmt.Fprintln(p.w, ui.Yellow("[!] Must be exactly 64 hex characters."))
+			}
+			if plugin.Asset == "" {
 				continue
 			}
 		} else {

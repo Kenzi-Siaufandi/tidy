@@ -96,6 +96,11 @@ type PluginDownloadResult struct {
 	VersionNumber string
 	GameVersion   string
 	Loader        string
+	// Repo, Tag and Asset carry GitHub release resolution (source "github").
+	// Tag is the resolved tag_name; the configured selector lives in state.
+	Repo  string
+	Tag   string
+	Asset string
 }
 
 // fetchVersions queries the version list endpoint with optional server-side

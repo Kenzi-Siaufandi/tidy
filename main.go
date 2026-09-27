@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -531,6 +532,9 @@ func main() {
 	// 4. Reconcile Plugins (Added, Updated, Removed, Unchanged with SHA-256)
 	installedPlugins := make(map[string]state.PluginState)
 	modClient := resolver.NewModrinthClient("", "", nil)
+	// GitHub release downloads reuse the same PAT as git sync
+	// (flag --git-token or env GIT_TOKEN / GIT_AUTH_TOKEN / GITHUB_TOKEN).
+	ghClient := resolver.NewGitHubClient("", gitToken, nil)
 
 	// A. Detect removed plugins (present in previous state but removed from tidy.toml)
 	if previousState != nil {
@@ -558,7 +562,8 @@ func main() {
 		var configChanged bool
 		// "latest" plugins always resolve upstream below (even when config is
 		// unchanged) to detect new releases; pins can skip via local SHA.
-		isLatest := source == "modrinth" && pCfg.IsLatest()
+		isLatest := (source == "modrinth" && pCfg.IsLatest()) ||
+			(source == "github" && pCfg.IsGitHubLatest())
 
 		// Check if plugin is already in state and unchanged
 		if previousState != nil {
@@ -593,6 +598,18 @@ func main() {
 				case "url":
 					// URL source has no version field: any URL or SHA change must trigger re-download.
 					if oldP.URL != "" && oldP.URL != strings.TrimSpace(pCfg.URL) {
+						configChanged = true
+					} else if !strings.EqualFold(strings.TrimSpace(oldP.SHA256), strings.TrimSpace(pCfg.SHA256)) {
+						configChanged = true
+					}
+				case "github":
+					// GitHub source: any repo, tag selector, asset or SHA change must trigger re-download.
+					if oldP.Repo != "" && oldP.Repo != strings.TrimSpace(pCfg.Repo) {
+						configChanged = true
+					} else if oldP.Tag != pCfg.NormalizedTag() {
+						configChanged = true
+					} else if oldP.Asset != "" && oldP.Asset != strings.TrimSpace(pCfg.Asset) {
+						// Asset changed (e.g. renamed jar between releases).
 						configChanged = true
 					} else if !strings.EqualFold(strings.TrimSpace(oldP.SHA256), strings.TrimSpace(pCfg.SHA256)) {
 						configChanged = true
@@ -693,7 +710,7 @@ func main() {
 					fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
 					os.Exit(1)
 				}
-				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Saved %s (%s, SHA256: %s, %d bytes)",
+				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (%s, SHA256: %s, %d bytes)",
 					pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
 				storeModrinth(res)
 				continue
@@ -704,7 +721,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
 				os.Exit(1)
 			}
-			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Saved %s (%s, SHA256: %s, %d bytes)",
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (%s, SHA256: %s, %d bytes)",
 				pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
 
 			storeModrinth(res)
@@ -715,7 +732,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
 				os.Exit(1)
 			}
-			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Saved %s (SHA256: %s, %d bytes)",
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (SHA256: %s, %d bytes)",
 				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)))
 
 			installedPlugins[pluginName] = state.PluginState{
@@ -729,13 +746,81 @@ func main() {
 			if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
 				_ = os.Remove(filepath.Join(workDir, "plugins", oldPlugin.Filename))
 			}
+		case "github":
+			storeGitHub := func(res *resolver.PluginDownloadResult) {
+				installedPlugins[pluginName] = state.PluginState{
+					Source:          "github",
+					Filename:        res.Filename,
+					Version:         pCfg.NormalizedTag(),
+					VersionID:       res.VersionID,
+					ResolvedVersion: res.VersionNumber,
+					Repo:            strings.TrimSpace(pCfg.Repo),
+					Tag:             pCfg.NormalizedTag(),
+					Asset:           strings.TrimSpace(pCfg.Asset),
+					HashAlgo:        res.HashAlgo,
+					Hash:            res.Hash,
+					SHA256:          res.SHA256,
+				}
+				if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
+					_ = os.Remove(filepath.Join(workDir, "plugins", oldPlugin.Filename))
+				}
+				// The jar is swapped but the plugin's on-disk configs/data are
+				// left untouched, so a breaking update can load stale files.
+				// Surface that instead of failing silently or wiping data.
+				if oldPlugin != nil && strings.TrimSpace(oldPlugin.ResolvedVersion) != "" &&
+					strings.TrimSpace(res.VersionNumber) != "" &&
+					oldPlugin.ResolvedVersion != res.VersionNumber {
+					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Plugin [%s]: updated %s -> %s; existing configs were left untouched — review breaking changes",
+						pluginName, oldPlugin.ResolvedVersion, res.VersionNumber)))
+				}
+			}
+
+			// Fast path for tag="latest": resolve metadata first and skip the
+			// download when the upstream release ID matches state and the
+			// local jar still verifies.
+			if isLatest && !configChanged && oldPlugin != nil && strings.TrimSpace(oldPlugin.VersionID) != "" {
+				rel, asset, resolveErr := ghClient.Resolve(ctx, pCfg)
+				if resolveErr != nil {
+					fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to resolve plugin %q: %v", pluginName, resolveErr)))
+					os.Exit(1)
+				}
+				if strconv.FormatInt(rel.ID, 10) == oldPlugin.VersionID {
+					localPath := filepath.Join(workDir, "plugins", oldPlugin.Filename)
+					if oldPlugin.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldPlugin.SHA256) {
+						fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[=] Plugin [%s]: %s is up-to-date (latest %s verified, skipped download)", pluginName, oldPlugin.Filename, rel.TagName)))
+						installedPlugins[pluginName] = *oldPlugin
+						continue
+					}
+				}
+				// A new release (or failed local hash) falls through silently;
+				// the result prints below.
+				res, err := ghClient.Download(ctx, pluginName, pCfg, workDir, rel, asset)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
+					os.Exit(1)
+				}
+				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (%s, SHA256: %s, %d bytes)",
+					pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
+				storeGitHub(res)
+				continue
+			}
+
+			res, err := ghClient.ResolveAndDownload(ctx, pluginName, pCfg, workDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
+				os.Exit(1)
+			}
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (%s, SHA256: %s, %d bytes)",
+				pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
+
+			storeGitHub(res)
 		case "local":
 			res, err := resolver.VerifyLocalPlugin(pluginName, pCfg, workDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to verify local plugin %q: %v", pluginName, err)))
 				os.Exit(1)
 			}
-			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Verified %s (SHA256: %s, %d bytes)",
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Verified local %s (SHA256: %s, %d bytes, no download)",
 				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)))
 
 			installedPlugins[pluginName] = state.PluginState{
@@ -760,7 +845,7 @@ func main() {
 				}
 			}
 		default:
-			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: plugin %q has unsupported source %q (supported: 'modrinth', 'url', 'local')", pluginName, pCfg.Source)))
+			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: plugin %q has unsupported source %q (supported: 'modrinth', 'url', 'github', 'local')", pluginName, pCfg.Source)))
 			os.Exit(1)
 		}
 	}
@@ -781,10 +866,10 @@ func main() {
 				fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[=] World/File [%s]: %s (%s)", name, filepath.Base(syncRes.Path), syncRes.Reason)))
 			} else {
 				if syncRes.Extracted {
-					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] World/File [%s]: Extracted %d files to %s (SHA-256 verified)",
+					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] World/File [%s]: Downloaded + extracted %d files to %s (SHA-256 verified)",
 						name, syncRes.Files, fCfg.Path)))
 				} else {
-					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] World/File [%s]: Saved to %s (SHA-256 verified)",
+					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] World/File [%s]: Downloaded to %s (SHA-256 verified)",
 						name, fCfg.Path)))
 				}
 			}

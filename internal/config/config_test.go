@@ -348,6 +348,171 @@ channel = "BETA"
 	}
 }
 
+func TestParseConfig_GitHubPluginValid(t *testing.T) {
+	raw := `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Private]
+source = "github"
+repo = "MyOrg/MyPlugin"
+tag = "v1.2.3"
+asset = "MyPlugin.jar"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[plugins.Tracked]
+source = "github"
+repo = "MyOrg/Other"
+asset = "Other.jar"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`
+	cfg, err := ParseConfig([]byte(raw))
+	if err != nil {
+		t.Fatalf("expected valid github config, got error: %v", err)
+	}
+	p := cfg.Plugins["Private"]
+	if p.Repo != "MyOrg/MyPlugin" || p.Tag != "v1.2.3" || p.Asset != "MyPlugin.jar" {
+		t.Errorf("unexpected github plugin config: %+v", p)
+	}
+	if cfg.Plugins["Tracked"].Tag != "latest" {
+		t.Errorf("expected default tag 'latest', got %q", cfg.Plugins["Tracked"].Tag)
+	}
+	if !cfg.Plugins["Tracked"].IsGitHubLatest() {
+		t.Errorf("expected IsGitHubLatest() for omitted tag")
+	}
+}
+
+func TestParseConfig_GitHubPluginValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "github missing repo",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "github"
+tag = "v1.0"
+asset = "Test.jar"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+		{
+			name: "github malformed repo",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "github"
+repo = "not-a-repo"
+tag = "v1.0"
+asset = "Test.jar"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+		{
+			name: "github missing asset",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "github"
+repo = "o/r"
+tag = "v1.0"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+		{
+			name: "github non-jar asset",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "github"
+repo = "o/r"
+asset = "Test.zip"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+		{
+			name: "github missing sha256",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "github"
+repo = "o/r"
+asset = "Test.jar"
+`,
+		},
+		{
+			name: "github with url",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "github"
+repo = "o/r"
+asset = "Test.jar"
+url = "https://example.com/test.jar"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+		{
+			name: "github with modrinth fields",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "github"
+repo = "o/r"
+asset = "Test.jar"
+project_id = "test"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+		{
+			name: "url with github fields",
+			raw: `
+[server]
+project = "paper"
+version = "26.2"
+
+[plugins.Test]
+source = "url"
+url = "https://example.com/test.jar"
+repo = "o/r"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := ParseConfig([]byte(tt.raw)); err == nil {
+				t.Errorf("expected error for %s, got nil", tt.name)
+			}
+		})
+	}
+}
+
 func TestParseConfig_LocalPluginValid(t *testing.T) {
 	raw := `
 [server]

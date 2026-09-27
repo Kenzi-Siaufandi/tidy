@@ -41,12 +41,15 @@ type PluginState struct {
 	Source          string `json:"source"`
 	Filename        string `json:"filename"`
 	Version         string `json:"version,omitempty"`          // configured selector ("latest" or pinned)
-	VersionID       string `json:"version_id,omitempty"`       // resolved Modrinth version ID
-	ResolvedVersion string `json:"resolved_version,omitempty"` // resolved version_number
+	VersionID       string `json:"version_id,omitempty"`       // resolved Modrinth version ID or GitHub release ID
+	ResolvedVersion string `json:"resolved_version,omitempty"` // resolved version_number (Modrinth) or tag_name (GitHub)
 	GameVersion     string `json:"game_version,omitempty"`
 	Loader          string `json:"loader,omitempty"`
 	Channel         string `json:"channel,omitempty"`
 	ProjectID       string `json:"project_id,omitempty"`
+	Repo            string `json:"repo,omitempty"`  // github source: configured "owner/repo"
+	Tag             string `json:"tag,omitempty"`   // github source: configured selector ("latest" or pinned tag)
+	Asset           string `json:"asset,omitempty"` // github source: exact release asset filename
 	URL             string `json:"url,omitempty"`
 	Path            string `json:"path,omitempty"` // configured path for local source (manually-uploaded jar)
 	HashAlgo        string `json:"hash_algo"`

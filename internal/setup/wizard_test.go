@@ -99,6 +99,33 @@ func TestCmdNew_Scripted(t *testing.T) {
 	}
 }
 
+func TestBuildTOML_GitHubPlugin(t *testing.T) {
+	spec := WizardSpec{
+		Server: WizardServer{Project: "paper", Version: "26.2", Build: "latest"},
+		Plugins: []WizardPlugin{{
+			Name: "Private", Source: "github",
+			Repo: "MyOrg/MyPlugin", Tag: "v1.2.3", Asset: "MyPlugin.jar",
+			SHA256: strings.Repeat("c", 64),
+		}},
+	}
+	out := BuildTOML(spec)
+	for _, want := range []string{
+		`[plugins.Private]`, `source = "github"`, `repo = "MyOrg/MyPlugin"`,
+		`tag = "v1.2.3"`, `asset = "MyPlugin.jar"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("BuildTOML missing %q:\n%s", want, out)
+		}
+	}
+	cfg, err := config.ParseConfig([]byte(out))
+	if err != nil {
+		t.Fatalf("generated github TOML does not validate: %v\n%s", err, out)
+	}
+	if p := cfg.Plugins["Private"]; p.Repo != "MyOrg/MyPlugin" || p.Tag != "v1.2.3" {
+		t.Errorf("unexpected github plugin: %+v", p)
+	}
+}
+
 func TestBuildTOML_LocalPlugin(t *testing.T) {
 	spec := WizardSpec{
 		Server:  WizardServer{Project: "paper", Version: "26.2", Build: "latest"},

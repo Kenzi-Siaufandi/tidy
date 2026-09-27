@@ -29,15 +29,18 @@ type ServerConfig struct {
 
 // PluginConfig defines an individual plugin dependency.
 type PluginConfig struct {
-	Source      string `toml:"source"`       // "modrinth", "url", or "local"
+	Source      string `toml:"source"`       // "modrinth", "url", "github", or "local"
 	ProjectID   string `toml:"project_id"`   // required for modrinth
 	Version     string `toml:"version"`      // modrinth plugin version pin, or "latest" (default)
 	GameVersion string `toml:"game_version"` // modrinth Minecraft version filter, e.g. "1.21.1"
 	Loader      string `toml:"loader"`       // modrinth loader filter, defaults to "paper"
 	Channel     string `toml:"channel"`      // "release" (default), "beta" (+beta), "alpha" (all)
 	URL         string `toml:"url"`          // required for url
+	Repo        string `toml:"repo"`         // required for github: "owner/repo"
+	Tag         string `toml:"tag"`          // github release tag, or "latest" (default)
+	Asset       string `toml:"asset"`        // required for github: exact release asset filename (e.g. "Vault.jar")
 	Path        string `toml:"path"`         // required for local: path to manually-uploaded jar (relative to workdir or absolute)
-	SHA256      string `toml:"sha256"`       // mandatory for url and local, optional for modrinth
+	SHA256      string `toml:"sha256"`       // mandatory for url, github and local, optional for modrinth
 }
 
 // DefaultModrinthLoader is used when a modrinth plugin omits 'loader'.
@@ -80,6 +83,21 @@ func (p PluginConfig) NormalizedChannel() string {
 // NormalizedGameVersion returns the trimmed Minecraft version filter ("", if unset).
 func (p PluginConfig) NormalizedGameVersion() string {
 	return strings.TrimSpace(p.GameVersion)
+}
+
+// IsGitHubLatest reports whether the plugin tracks the newest GitHub release
+// instead of a pinned tag.
+func (p PluginConfig) IsGitHubLatest() bool {
+	v := strings.TrimSpace(p.Tag)
+	return v == "" || strings.EqualFold(v, "latest")
+}
+
+// NormalizedTag returns the effective release tag selector ("latest" when unset).
+func (p PluginConfig) NormalizedTag() string {
+	if p.IsGitHubLatest() {
+		return "latest"
+	}
+	return strings.TrimSpace(p.Tag)
 }
 
 // FileConfig defines a large file or world asset download.
@@ -171,6 +189,9 @@ func (c *Config) Validate() error {
 			if strings.TrimSpace(p.URL) != "" {
 				return fmt.Errorf("plugin %q: 'url' only applies to url source", name)
 			}
+			if strings.TrimSpace(p.Repo) != "" || strings.TrimSpace(p.Tag) != "" || strings.TrimSpace(p.Asset) != "" {
+				return fmt.Errorf("plugin %q: 'repo'/'tag'/'asset' only apply to github source", name)
+			}
 			if strings.TrimSpace(p.Path) != "" {
 				return fmt.Errorf("plugin %q: 'path' only applies to local source", name)
 			}
@@ -212,6 +233,9 @@ func (c *Config) Validate() error {
 			if strings.TrimSpace(p.ProjectID) != "" || strings.TrimSpace(p.Version) != "" {
 				return fmt.Errorf("plugin %q: 'project_id'/'version' only apply to modrinth source", name)
 			}
+			if strings.TrimSpace(p.Repo) != "" || strings.TrimSpace(p.Tag) != "" || strings.TrimSpace(p.Asset) != "" {
+				return fmt.Errorf("plugin %q: 'repo'/'tag'/'asset' only apply to github source", name)
+			}
 			sha := strings.TrimSpace(p.SHA256)
 			if sha == "" {
 				return fmt.Errorf("plugin %q: url source MUST provide 'sha256' for verification", name)
@@ -219,6 +243,47 @@ func (c *Config) Validate() error {
 			if err := validateSHA256Hex(sha); err != nil {
 				return fmt.Errorf("plugin %q: invalid 'sha256': %w", name, err)
 			}
+		case "github":
+			repo := strings.TrimSpace(p.Repo)
+			if repo == "" {
+				return fmt.Errorf("plugin %q: github source requires 'repo' (e.g. 'MilkBowl/Vault')", name)
+			}
+			if err := validateGitHubRepo(repo); err != nil {
+				return fmt.Errorf("plugin %q: invalid 'repo': %w", name, err)
+			}
+			asset := strings.TrimSpace(p.Asset)
+			if asset == "" {
+				return fmt.Errorf("plugin %q: github source requires 'asset' (exact release asset filename, e.g. 'Vault.jar')", name)
+			}
+			if strings.Contains(asset, "/") || strings.Contains(asset, "\\") {
+				return fmt.Errorf("plugin %q: invalid 'asset' %q: must be a filename without path separators", name, p.Asset)
+			}
+			if !strings.HasSuffix(strings.ToLower(asset), ".jar") {
+				return fmt.Errorf("plugin %q: invalid 'asset' %q: must point to a .jar file", name, p.Asset)
+			}
+			// 'tag' is optional and defaults to "latest" (track newest
+			// release). Apply defaults so downstream code and state
+			// comparisons see normalized values.
+			p.Repo = repo
+			p.Tag = p.NormalizedTag()
+			p.Asset = asset
+			if strings.TrimSpace(p.URL) != "" {
+				return fmt.Errorf("plugin %q: 'url' only applies to url source", name)
+			}
+			if strings.TrimSpace(p.Path) != "" {
+				return fmt.Errorf("plugin %q: 'path' only applies to local source", name)
+			}
+			if strings.TrimSpace(p.ProjectID) != "" || strings.TrimSpace(p.Version) != "" || strings.TrimSpace(p.GameVersion) != "" || strings.TrimSpace(p.Loader) != "" || strings.TrimSpace(p.Channel) != "" {
+				return fmt.Errorf("plugin %q: 'project_id'/'version'/'game_version'/'loader'/'channel' only apply to modrinth source", name)
+			}
+			sha := strings.TrimSpace(p.SHA256)
+			if sha == "" {
+				return fmt.Errorf("plugin %q: github source MUST provide 'sha256' for verification", name)
+			}
+			if err := validateSHA256Hex(sha); err != nil {
+				return fmt.Errorf("plugin %q: invalid 'sha256': %w", name, err)
+			}
+			c.Plugins[name] = p
 		case "local":
 			if strings.TrimSpace(p.Path) == "" {
 				return fmt.Errorf("plugin %q: local source requires 'path' to the manually-uploaded jar (e.g. 'plugins/MyPlugin.jar')", name)
@@ -232,6 +297,9 @@ func (c *Config) Validate() error {
 			if strings.TrimSpace(p.ProjectID) != "" || strings.TrimSpace(p.Version) != "" || strings.TrimSpace(p.GameVersion) != "" || strings.TrimSpace(p.Loader) != "" || strings.TrimSpace(p.Channel) != "" {
 				return fmt.Errorf("plugin %q: 'project_id'/'version'/'game_version'/'loader'/'channel' only apply to modrinth source", name)
 			}
+			if strings.TrimSpace(p.Repo) != "" || strings.TrimSpace(p.Tag) != "" || strings.TrimSpace(p.Asset) != "" {
+				return fmt.Errorf("plugin %q: 'repo'/'tag'/'asset' only apply to github source", name)
+			}
 			sha := strings.TrimSpace(p.SHA256)
 			if sha == "" {
 				return fmt.Errorf("plugin %q: local source MUST provide 'sha256' for verification", name)
@@ -242,7 +310,7 @@ func (c *Config) Validate() error {
 			p.Path = strings.TrimSpace(p.Path)
 			c.Plugins[name] = p
 		default:
-			return fmt.Errorf("plugin %q: unsupported source %q (supported: 'modrinth', 'url', 'local')", name, p.Source)
+			return fmt.Errorf("plugin %q: unsupported source %q (supported: 'modrinth', 'url', 'github', 'local')", name, p.Source)
 		}
 	}
 
@@ -311,6 +379,19 @@ func validateSHA256Hex(sha string) error {
 	}
 	if _, err := hex.DecodeString(sha); err != nil {
 		return fmt.Errorf("invalid hexadecimal characters: %w", err)
+	}
+	return nil
+}
+
+// validateGitHubRepo verifies the "owner/repo" shape (exactly one slash,
+// non-empty sides, no whitespace).
+func validateGitHubRepo(repo string) error {
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return fmt.Errorf("expected \"owner/repo\" (e.g. 'MilkBowl/Vault'), got %q", repo)
+	}
+	if strings.ContainsAny(repo, " \t\n\r") {
+		return fmt.Errorf("expected \"owner/repo\" without whitespace, got %q", repo)
 	}
 	return nil
 }
