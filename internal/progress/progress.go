@@ -41,6 +41,11 @@ var MinSize int64 = 1 << 20 // 1 MiB
 // it defaults to false so tests stay silent.
 var Enabled bool
 
+// ForceLive forces live \r rendering even when the output is not a
+// character device. The tidy CLI sets it when its console is a terminal
+// but stdout/stderr are teed to a run log through pipes.
+var ForceLive bool
+
 var spinnerFrames = []string{"|", "/", "-", "\\"}
 
 // Bar tracks a single download. Use New; the returned Bar is always safe to
@@ -83,7 +88,7 @@ func NewTo(out io.Writer, label string, total int64) *Bar {
 		start:         time.Now(),
 		last:          time.Now(),
 		active:        Enabled && out != nil && label != "",
-		tty:           isTerminal(out),
+		tty:           isTerminal(out) || ForceLive,
 		nextMilestone: pipeMilestoneStep,
 		nextBytes:     pipeByteStep,
 	}

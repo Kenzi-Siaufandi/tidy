@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/config"
@@ -26,11 +28,19 @@ import (
 
 const Version = version.Version
 
-// driftReportPrefix names the panel-viewable drift reports inside .tidy.
-// A file is written per drift event (clean runs write nothing) as
-// drift-YYYY-MM-DD_HH-MM-SS.txt, never pruned, so old reports remain
-// as history.
-const driftReportPrefix = ".tidy/drift-"
+// driftReportDir holds the panel-viewable drift reports: one file per drift
+// event (clean runs write nothing), never pruned, so old reports remain as
+// history without cluttering .tidy itself.
+const driftReportDir = ".tidy/drift"
+
+// driftReportPrefix names the drift reports inside driftReportDir.
+const driftReportPrefix = ".tidy/drift/drift-"
+
+// runLogDir holds one console-output log per tidy run, never pruned.
+const runLogDir = ".tidy/log"
+
+// runLogPrefix names the per-run logs inside runLogDir.
+const runLogPrefix = ".tidy/log/tidy-"
 
 // driftReportCap bounds each report section so messy servers stay readable.
 const driftReportCap = 50
@@ -45,22 +55,27 @@ const driftDiffFilesCap = 10
 const driftDiffLinesCap = 80
 
 // driftReportName returns the report path for a run timestamp, e.g.
-// .tidy/drift-2026-09-23_05-30-24.txt. Hyphens keep it shell/panel-safe.
+// .tidy/drift/drift-2026-09-23_05-30-24.txt. Hyphens keep it shell/panel-safe.
 func driftReportName(now time.Time) string {
 	return driftReportPrefix + now.Format("2006-01-02_15-04-05") + ".txt"
+}
+
+// runLogName returns the run-log path for a timestamp, e.g.
+// .tidy/log/tidy-2026-09-23_05-30-24.log.
+func runLogName(now time.Time) string {
+	return runLogPrefix + now.Format("2006-01-02_15-04-05") + ".log"
 }
 
 // maxDriftReportAttempts bounds the same-second suffix probe so a .tidy
 // path conflict (file vs directory, permission errors, crash loops) can
 // never hang the boot sequence. Exhaustion falls back to a nanosecond
-// suffix below.
+// suffix below. Shared by drift reports and run logs.
 const maxDriftReportAttempts = 100
 
-// uniqueDriftReportName keeps the agreed datetime format but avoids losing
+// uniqueDatedName keeps the agreed datetime format but avoids losing
 // history when two runs land in the same second (crash loops): the second
-// run gets drift-...-1.txt, then -2, and so on.
-func uniqueDriftReportName(workDir string, now time.Time) string {
-	base := driftReportName(now)
+// run gets ...-1.txt, then -2, and so on.
+func uniqueDatedName(workDir, prefix, base, ext string, now time.Time) string {
 	if _, err := os.Stat(filepath.Join(workDir, base)); err != nil {
 		if os.IsNotExist(err) {
 			return base
@@ -68,13 +83,13 @@ func uniqueDriftReportName(workDir string, now time.Time) string {
 		// Stat failed for another reason (permissions, .tidy is a file,
 		// I/O error): do not spin probing. Return a nanosecond-suffixed
 		// name so the boot proceeds; the write itself is best-effort.
-		return fmt.Sprintf("%s%s-%d.txt", driftReportPrefix,
-			strings.TrimSuffix(strings.TrimPrefix(base, driftReportPrefix), ".txt"),
-			now.UnixNano()%1000000)
+		return fmt.Sprintf("%s%s-%d%s", prefix,
+			strings.TrimSuffix(strings.TrimPrefix(base, prefix), ext),
+			now.UnixNano()%1000000, ext)
 	}
-	trimmed := strings.TrimSuffix(strings.TrimPrefix(base, driftReportPrefix), ".txt")
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(base, prefix), ext)
 	for i := 1; i <= maxDriftReportAttempts; i++ {
-		candidate := fmt.Sprintf("%s%s-%d.txt", driftReportPrefix, trimmed, i)
+		candidate := fmt.Sprintf("%s%s-%d%s", prefix, trimmed, i, ext)
 		if _, err := os.Stat(filepath.Join(workDir, candidate)); err != nil {
 			if os.IsNotExist(err) {
 				return candidate
@@ -84,7 +99,20 @@ func uniqueDriftReportName(workDir string, now time.Time) string {
 		}
 	}
 	// Suffix space exhausted: nanosecond fallback guarantees progress.
-	return fmt.Sprintf("%s%s-%d.txt", driftReportPrefix, trimmed, now.UnixNano())
+	return fmt.Sprintf("%s%s-%d%s", prefix, trimmed, now.UnixNano(), ext)
+}
+
+// uniqueDriftReportName keeps the agreed datetime format but avoids losing
+// history when two runs land in the same second (crash loops): the second
+// run gets drift-...-1.txt, then -2, and so on.
+func uniqueDriftReportName(workDir string, now time.Time) string {
+	return uniqueDatedName(workDir, driftReportPrefix, driftReportName(now), ".txt", now)
+}
+
+// uniqueRunLogName is the run-log counterpart: same-second runs get
+// tidy-...-1.log, then -2, and so on.
+func uniqueRunLogName(workDir string, now time.Time) string {
+	return uniqueDatedName(workDir, runLogPrefix, runLogName(now), ".log", now)
 }
 
 // volatileDateComment matches the timestamp line java.util.Properties.store()
@@ -355,18 +383,139 @@ func writeDiffSection(b *strings.Builder, modified []string, diffs map[string]st
 	}
 }
 
-// writeDriftReport persists the dated drift report under .tidy. Best-effort.
+// writeDriftReport persists the dated drift report under .tidy/drift.
+// Best-effort.
 func writeDriftReport(workDir, reportName string, now time.Time, modified, untracked []string, diffs map[string]string, churnSkipped int) {
-	if err := os.MkdirAll(filepath.Join(workDir, ".tidy"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(workDir, driftReportDir), 0755); err != nil {
 		return
 	}
 	content := formatDriftReport(modified, untracked, diffs, churnSkipped, now)
 	_ = os.WriteFile(filepath.Join(workDir, reportName), []byte(content), 0644)
 }
 
+// ansiSGR matches SGR color codes (see internal/ui) so run logs stay plain
+// text while the panel console keeps its colors.
+var ansiSGR = regexp.MustCompile("\x1b\\[[0-9;]*[A-Za-z]")
+
+var (
+	runLogFile  *os.File
+	runLogPipes []*os.File
+	runLogWait  sync.WaitGroup
+)
+
+// startRunLog tees this run's stdout/stderr into
+// .tidy/log/tidy-YYYY-MM-DD_HH-MM-SS.log while leaving the console output
+// untouched. Best-effort: when the log cannot be created the run proceeds
+// unlogged. The log carries plain text (color codes stripped, \r progress
+// redraws folded to newlines) so it reads well in the panel file manager.
+func startRunLog(workDir string, now time.Time) {
+	if err := os.MkdirAll(filepath.Join(workDir, runLogDir), 0755); err != nil {
+		return
+	}
+	name := uniqueRunLogName(workDir, now)
+	f, err := os.OpenFile(filepath.Join(workDir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil {
+		return
+	}
+	runLogFile = f
+	os.Stdout = teeToLog(os.Stdout, f)
+	os.Stderr = teeToLog(os.Stderr, f)
+}
+
+// teeToLog swaps dst for a pipe writer and streams everything written to it
+// to both dst and the run log.
+func teeToLog(dst *os.File, log *os.File) *os.File {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return dst
+	}
+	runLogPipes = append(runLogPipes, w)
+	runLogWait.Add(1)
+	go func() {
+		defer runLogWait.Done()
+		defer r.Close()
+		buf := make([]byte, 32*1024)
+		for {
+			n, rerr := r.Read(buf)
+			if n > 0 {
+				chunk := buf[:n]
+				_, _ = dst.Write(chunk)
+				plain := ansiSGR.ReplaceAll(chunk, nil)
+				plain = bytes.ReplaceAll(plain, []byte("\r"), []byte("\n"))
+				_, _ = log.Write(plain)
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+	return w
+}
+
+// finishRunLog drains the tee goroutines and closes the run log. It must
+// run before every process exit or the log tail is lost (deferred calls do
+// not run on os.Exit).
+func finishRunLog() {
+	for _, p := range runLogPipes {
+		_ = p.Close()
+	}
+	runLogPipes = nil
+	runLogWait.Wait()
+	if runLogFile != nil {
+		_ = runLogFile.Close()
+		runLogFile = nil
+	}
+}
+
+// exitWithLog flushes the run log, then exits.
+func exitWithLog(code int) {
+	finishRunLog()
+	os.Exit(code)
+}
+
+// isCharDevice reports whether f is a terminal (used to preserve live
+// progress bars: teeing through pipes would otherwise downgrade them to
+// piped milestone lines even on a real terminal).
+func isCharDevice(f *os.File) bool {
+	st, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return st.Mode()&os.ModeCharDevice != 0
+}
+
+// setupWorkdir pre-scans setup args for --workdir/--root (both dash forms,
+// with space or =) so setup runs log under the same workdir setup itself
+// will use. Defaults to "." like setup.Run.
+func setupWorkdir(args []string) string {
+	dir := "."
+	for i := 0; i < len(args); i++ {
+		name, value, hasValue := strings.Cut(args[i], "=")
+		name = strings.TrimLeft(name, "-")
+		if name != "workdir" && name != "root" {
+			continue
+		}
+		if hasValue {
+			if strings.TrimSpace(value) != "" {
+				dir = value
+			}
+			continue
+		}
+		if i+1 < len(args) {
+			dir = args[i+1]
+			i++
+		}
+	}
+	return dir
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "setup" {
-		os.Exit(setup.Run(os.Args[2:]))
+		if abs, err := filepath.Abs(setupWorkdir(os.Args[2:])); err == nil {
+			progress.ForceLive = isCharDevice(os.Stderr)
+			startRunLog(abs, time.Now())
+		}
+		exitWithLog(setup.Run(os.Args[2:]))
 	}
 	var (
 		configFlag     = flag.String("config", "tidy.toml", "Path to tidy.toml configuration file")
@@ -389,15 +538,19 @@ func main() {
 	}
 	progress.Enabled = !*noProgressFlag
 
-	if *versionFlag {
-		fmt.Printf("Tidy v%s\n", Version)
-		os.Exit(0)
-	}
-
 	workDir, err := filepath.Abs(*workDirFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: failed to determine absolute path for workdir: %v", err)))
-		os.Exit(1)
+		exitWithLog(1)
+	}
+
+	// Log every run under .tidy/log/ from here on (banner included).
+	progress.ForceLive = isCharDevice(os.Stderr)
+	startRunLog(workDir, time.Now())
+
+	if *versionFlag {
+		fmt.Printf("Tidy v%s\n", Version)
+		exitWithLog(0)
 	}
 
 	fmt.Println(ui.Bold("=================================================================="))
@@ -459,7 +612,7 @@ func main() {
 		gitClient, err := git.NewClient()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: %v", err)))
-			os.Exit(1)
+			exitWithLog(1)
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -477,7 +630,7 @@ func main() {
 			fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Git: Initializing clone from %s (branch: %s)...", git.MaskURL(gitRepo), gitBranch)))
 			if err := gitClient.Clone(ctx, gitOpts); err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Git clone failed: %v", err)))
-				os.Exit(1)
+				exitWithLog(1)
 			}
 			headCommit, headErr := gitClient.GetHeadCommit(ctx, workDir)
 			if headErr != nil {
@@ -496,7 +649,7 @@ func main() {
 			pullRes, err := gitClient.Pull(ctx, gitOpts)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Git pull failed: %v", err)))
-				os.Exit(1)
+				exitWithLog(1)
 			}
 			currentCommit = pullRes.NewCommit
 
@@ -526,14 +679,14 @@ func main() {
 
 	if _, err := os.Stat(configFile); err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Configuration file %q not found: %v", configFile, err)))
-		os.Exit(1)
+		exitWithLog(1)
 	}
 
 	fmt.Printf("%s\n", ui.Cyan(fmt.Sprintf("[*] Config: Loading %s...", filepath.Base(configFile))))
 	cfg, err := config.LoadConfig(configFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to load config: %v", err)))
-		os.Exit(1)
+		exitWithLog(1)
 	}
 
 	ctx := context.Background()
@@ -602,7 +755,7 @@ func main() {
 		serverRes, err := serverResolver.ResolveAndDownload(ctx, cfg.Server, workDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to resolve/download server software: %v", err)))
-			os.Exit(1)
+			exitWithLog(1)
 		}
 		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Server: Downloaded %s (Build #%d, SHA256: %s, %d bytes)",
 			serverRes.Filename, serverRes.BuildID, serverRes.SHA256[:12]+"...", serverRes.Size)))
@@ -796,7 +949,7 @@ func main() {
 				ver, file, resolveErr := modClient.Resolve(ctx, pCfg)
 				if resolveErr != nil {
 					fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to resolve plugin %q: %v", pluginName, resolveErr)))
-					os.Exit(1)
+					exitWithLog(1)
 				}
 				if ver.ID == oldPlugin.VersionID {
 					localPath, pathErr := statePluginPath(workDir, oldPlugin.Filename)
@@ -811,7 +964,7 @@ func main() {
 				res, err := modClient.Download(ctx, pluginName, pCfg, workDir, ver, file)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
-					os.Exit(1)
+					exitWithLog(1)
 				}
 				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (%s, SHA256: %s, %d bytes)",
 					pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
@@ -822,7 +975,7 @@ func main() {
 			res, err := modClient.ResolveAndDownload(ctx, pluginName, pCfg, workDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
-				os.Exit(1)
+				exitWithLog(1)
 			}
 			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (%s, SHA256: %s, %d bytes)",
 				pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
@@ -833,7 +986,7 @@ func main() {
 			res, err := resolver.ResolveAndDownloadURL(ctx, pluginName, pCfg, workDir, nil)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
-				os.Exit(1)
+				exitWithLog(1)
 			}
 			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (SHA256: %s, %d bytes)",
 				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)))
@@ -885,7 +1038,7 @@ func main() {
 				rel, asset, resolveErr := ghClient.Resolve(ctx, pCfg)
 				if resolveErr != nil {
 					fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to resolve plugin %q: %v", pluginName, resolveErr)))
-					os.Exit(1)
+					exitWithLog(1)
 				}
 				if strconv.FormatInt(rel.ID, 10) == oldPlugin.VersionID {
 					localPath, pathErr := statePluginPath(workDir, oldPlugin.Filename)
@@ -900,7 +1053,7 @@ func main() {
 				res, err := ghClient.Download(ctx, pluginName, pCfg, workDir, rel, asset)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
-					os.Exit(1)
+					exitWithLog(1)
 				}
 				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (%s, SHA256: %s, %d bytes)",
 					pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
@@ -911,7 +1064,7 @@ func main() {
 			res, err := ghClient.ResolveAndDownload(ctx, pluginName, pCfg, workDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to download plugin %q: %v", pluginName, err)))
-				os.Exit(1)
+				exitWithLog(1)
 			}
 			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (%s, SHA256: %s, %d bytes)",
 				pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
@@ -921,7 +1074,7 @@ func main() {
 			res, err := resolver.VerifyLocalPlugin(pluginName, pCfg, workDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to verify local plugin %q: %v", pluginName, err)))
-				os.Exit(1)
+				exitWithLog(1)
 			}
 			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Verified local %s (SHA256: %s, %d bytes, no download)",
 				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)))
@@ -953,7 +1106,7 @@ func main() {
 			}
 		default:
 			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: plugin %q has unsupported source %q (supported: 'modrinth', 'url', 'github', 'local')", pluginName, pCfg.Source)))
-			os.Exit(1)
+			exitWithLog(1)
 		}
 	}
 
@@ -966,7 +1119,7 @@ func main() {
 			syncRes, err := storageMgr.SyncFile(ctx, name, fCfg, workDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to synchronize file/world %q: %v", name, err)))
-				os.Exit(1)
+				exitWithLog(1)
 			}
 
 			if syncRes.Skipped {
@@ -1044,4 +1197,5 @@ func main() {
 	fmt.Println(ui.Green("  [✓] Pre-flight orchestration completed successfully!"))
 	fmt.Printf("  Container is ready for Java 25 startup: java -jar %s\n", jarlink.AliasFromEnv(os.Getenv))
 	fmt.Println(ui.Bold("=================================================================="))
+	finishRunLog()
 }

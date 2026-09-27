@@ -12,6 +12,7 @@ import (
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/git"
 	"github.com/Kenzi-Siaufandi/tidy/internal/state"
+	"github.com/Kenzi-Siaufandi/tidy/internal/ui"
 )
 
 func TestFormatDriftReport_Sections(t *testing.T) {
@@ -49,7 +50,7 @@ func TestFormatDriftReport_Sections(t *testing.T) {
 
 func TestDriftReportName_DatetimeNoPrune(t *testing.T) {
 	now := time.Date(2026, 9, 23, 5, 30, 24, 0, time.UTC)
-	want := ".tidy/drift-2026-09-23_05-30-24.txt"
+	want := ".tidy/drift/drift-2026-09-23_05-30-24.txt"
 	if got := driftReportName(now); got != want {
 		t.Errorf("driftReportName = %q, want %q", got, want)
 	}
@@ -67,18 +68,18 @@ func TestUniqueDriftReportName_SameSecondCollision(t *testing.T) {
 	workDir := t.TempDir()
 	now := time.Date(2026, 9, 23, 5, 30, 24, 0, time.UTC)
 	first := uniqueDriftReportName(workDir, now)
-	if first != ".tidy/drift-2026-09-23_05-30-24.txt" {
+	if first != ".tidy/drift/drift-2026-09-23_05-30-24.txt" {
 		t.Fatalf("first name = %q, want base datetime name", first)
 	}
 	// Simulate a crash loop: base name already taken within the same second.
-	if err := os.MkdirAll(filepath.Join(workDir, ".tidy"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(workDir, ".tidy", "drift"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(workDir, first), []byte("x"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	second := uniqueDriftReportName(workDir, now)
-	if second != ".tidy/drift-2026-09-23_05-30-24-1.txt" {
+	if second != ".tidy/drift/drift-2026-09-23_05-30-24-1.txt" {
 		t.Errorf("second name = %q, want -1 suffix", second)
 	}
 }
@@ -86,7 +87,7 @@ func TestUniqueDriftReportName_SameSecondCollision(t *testing.T) {
 func TestUniqueDriftReportName_BoundedOnExhaustion(t *testing.T) {
 	workDir := t.TempDir()
 	now := time.Date(2026, 9, 23, 5, 30, 24, 0, time.UTC)
-	if err := os.MkdirAll(filepath.Join(workDir, ".tidy"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(workDir, ".tidy", "drift"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	base := driftReportName(now)
@@ -147,7 +148,7 @@ func TestHasRealDiff(t *testing.T) {
 }
 
 func TestIsTidyInternal(t *testing.T) {
-	for _, p := range []string{".tidy", ".tidy/", ".tidy/state.json", ".tidy/drift-2026-09-23_05-30-24.txt", "./.tidy/state.json"} {
+	for _, p := range []string{".tidy", ".tidy/", ".tidy/state.json", ".tidy/drift/drift-2026-09-23_05-30-24.txt", ".tidy/drift", ".tidy/log/tidy-2026-09-23_05-30-24.log", ".tidy/log", "./.tidy/state.json"} {
 		if !isTidyInternal(p) {
 			t.Errorf("isTidyInternal(%q) = false, want true", p)
 		}
@@ -278,17 +279,17 @@ func TestReportDrift_EndToEnd(t *testing.T) {
 	}
 	// Pollute .tidy with runtime state from a previous run: it must never
 	// surface as drift.
-	if err := os.MkdirAll(filepath.Join(workDir, ".tidy"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(workDir, ".tidy", "drift"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	write(filepath.Join(".tidy", "state.json"), "{}\n")
 	// Fixed ancient name: can never collide with the fresh report's timestamp.
-	write(filepath.Join(".tidy", "drift-2000-01-01_00-00-00.txt"), "old report\n")
+	write(filepath.Join(".tidy", "drift", "drift-2000-01-01_00-00-00.txt"), "old report\n")
 
 	prev := &state.State{TemplatedFiles: []string{"templated.yml"}}
 	reportDrift(context.Background(), client, workDir, "tidy.toml", prev)
 
-	seeded := filepath.Join(workDir, ".tidy", "drift-2000-01-01_00-00-00.txt")
+	seeded := filepath.Join(workDir, ".tidy", "drift", "drift-2000-01-01_00-00-00.txt")
 	matches, err := filepath.Glob(filepath.Join(workDir, driftReportPrefix+"*.txt"))
 	if err != nil {
 		t.Fatal(err)
@@ -444,5 +445,96 @@ func TestStatePaths_RejectTraversal(t *testing.T) {
 	}
 	if p, err := statePluginPath(workDir, "Good.jar"); err != nil || p == "" {
 		t.Errorf("expected Good.jar to be accepted: %v", err)
+	}
+}
+
+func TestRunLogName_DatetimeNoPrune(t *testing.T) {
+	now := time.Date(2026, 9, 23, 5, 30, 24, 0, time.UTC)
+	want := ".tidy/log/tidy-2026-09-23_05-30-24.log"
+	if got := runLogName(now); got != want {
+		t.Errorf("runLogName = %q, want %q", got, want)
+	}
+	other := runLogName(now.Add(time.Second))
+	if other == want {
+		t.Errorf("expected a new filename per timestamp, got %q twice", other)
+	}
+	if !strings.HasPrefix(other, runLogPrefix) {
+		t.Errorf("name %q must live under %q", other, runLogPrefix)
+	}
+}
+
+func TestUniqueRunLogName_SameSecondCollision(t *testing.T) {
+	workDir := t.TempDir()
+	now := time.Date(2026, 9, 23, 5, 30, 24, 0, time.UTC)
+	if err := os.MkdirAll(filepath.Join(workDir, ".tidy", "log"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	first := uniqueRunLogName(workDir, now)
+	if first != ".tidy/log/tidy-2026-09-23_05-30-24.log" {
+		t.Fatalf("first name = %q, want base datetime name", first)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, first), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if second := uniqueRunLogName(workDir, now); second != ".tidy/log/tidy-2026-09-23_05-30-24-1.log" {
+		t.Errorf("second name = %q, want -1 suffix", second)
+	}
+}
+
+func TestStartFinishRunLog_CapturesPlainText(t *testing.T) {
+	workDir := t.TempDir()
+	now := time.Date(2026, 9, 23, 5, 30, 24, 0, time.UTC)
+
+	prevOut, prevErr := os.Stdout, os.Stderr
+	prevColor := ui.Enabled()
+	ui.SetEnabled(true)
+	defer func() {
+		os.Stdout, os.Stderr = prevOut, prevErr
+		ui.SetEnabled(prevColor)
+	}()
+
+	startRunLog(workDir, now)
+	if runLogFile == nil {
+		t.Fatal("startRunLog did not open a log file")
+	}
+	fmt.Printf("%s\n", ui.Green("stdout-line"))
+	fmt.Fprintf(os.Stderr, "%s\n", ui.Red("stderr-line"))
+	finishRunLog()
+	os.Stdout, os.Stderr = prevOut, prevErr
+
+	raw, err := os.ReadFile(filepath.Join(workDir, ".tidy", "log", "tidy-2026-09-23_05-30-24.log"))
+	if err != nil {
+		t.Fatalf("run log was not written: %v", err)
+	}
+	content := string(raw)
+	for _, want := range []string{"stdout-line", "stderr-line"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("log missing %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "\x1b[") {
+		t.Errorf("log must be plain text without ANSI codes:\n%q", content)
+	}
+}
+
+func TestSetupWorkdir(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", nil, "."},
+		{"unrelated flags", []string{"init", "--no-color"}, "."},
+		{"space form", []string{"init", "--workdir", "/data"}, "/data"},
+		{"equals form", []string{"--workdir=/data"}, "/data"},
+		{"root alias", []string{"--root", "/srv"}, "/srv"},
+		{"single dash", []string{"-workdir", "/x"}, "/x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := setupWorkdir(tt.args); got != tt.want {
+				t.Errorf("setupWorkdir(%v) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
 	}
 }

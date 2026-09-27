@@ -50,7 +50,7 @@ tidy setup new --workdir /path/to/server
 
 Tidy treats git as one-way: the **remote is source of truth**. Every run
 does `fetch` + `reset --hard`, so panel/local edits that aren't committed
-and pushed are **discarded** (saved first to `.tidy/drift-*.txt` for review).
+and pushed are **discarded** (saved first to `.tidy/drift/drift-*.txt` for review).
 The workflow is: edit locally → commit → push → restart container (or run `tidy`).
 
 What belongs in git vs. what doesn't:
@@ -107,14 +107,16 @@ git push
 
 # Then restart the server / re-run tidy to pull.
 # Local drift? Check what the last sync discarded:
-cat .tidy/drift-*.txt | tail -n 100
+cat .tidy/drift/drift-*.txt | tail -n 100
+# Full console output of any run (plain text, one file per run, never pruned):
+ls .tidy/log/
 ```
 
 Notes:
 
 - Templated `{{VAR}}` files and the `server.properties` date header (`#Sun Sep 20 ...`, rewritten every boot) are expected-dirty and never count as drift.
 - Missing env var leaves `{{VAR}}` in place + warning, not fatal — set it in the panel before relying on the value.
-- `.tidy/` state and drift reports are local-only and always ignored.
+- `.tidy/` state, drift reports, and run logs are local-only and always ignored.
 
 ---
 
