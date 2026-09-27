@@ -96,7 +96,9 @@ func LoadState(workDir string) (*State, error) {
 	return &s, nil
 }
 
-// SaveState commits the state metadata to .tidy/state.json.
+// SaveState commits the state metadata to .tidy/state.json atomically
+// (write-to-temp + rename) so a forced container restart mid-write can
+// never leave a truncated state file behind.
 func SaveState(workDir string, s *State) error {
 	dir := filepath.Join(workDir, ".tidy")
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -109,7 +111,27 @@ func SaveState(workDir string, s *State) error {
 		return fmt.Errorf("failed to serialize state: %w", err)
 	}
 
-	if err := os.WriteFile(statePath, data, 0644); err != nil {
+	tmp, err := os.CreateTemp(dir, ".state-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp state file: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("failed to write temp state file: %w", err)
+	}
+	if err := tmp.Chmod(0644); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("failed to chmod temp state file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("failed to close temp state file: %w", err)
+	}
+	if err := os.Rename(tmpName, statePath); err != nil {
+		_ = os.Remove(tmpName)
 		return fmt.Errorf("failed to write state file: %w", err)
 	}
 

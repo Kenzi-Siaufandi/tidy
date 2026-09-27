@@ -87,9 +87,9 @@ func TestParseConfig_FileValidation(t *testing.T) {
 	tests := []struct {
 		name string
 		raw  string
-	}{		{
-			name: "files missing sha256",
-			raw: `
+	}{{
+		name: "files missing sha256",
+		raw: `
 [server]
 project = "paper"
 version = "26.2"
@@ -98,7 +98,7 @@ version = "26.2"
 path = "world"
 url = "https://example.com/test.zip"
 `,
-		},
+	},
 		{
 			name: "files invalid sha256 length",
 			raw: `
@@ -665,4 +665,46 @@ path = "plugins/Test.jar"
 			}
 		})
 	}
+}
+
+func TestParseConfig_TemplateDefaultsIncludeAllExtensions(t *testing.T) {
+	raw := `
+[server]
+project = "paper"
+version = "26.2"
+`
+	cfg, err := ParseConfig([]byte(raw))
+	if err != nil {
+		t.Fatalf("expected valid config, got %v", err)
+	}
+	joined := "\n" + stringJoin(cfg.Templates.Paths, "\n") + "\n"
+	for _, want := range []string{"*.toml", "*.txt", "*.cfg", "*.env", "plugins/**/*.toml", "config/**/*.env"} {
+		if !stringContains(joined, want) {
+			t.Errorf("default template paths missing %q, got %v", want, cfg.Templates.Paths)
+		}
+	}
+}
+
+func stringJoin(in []string, sep string) string {
+	out := ""
+	for i, s := range in {
+		if i > 0 {
+			out += sep
+		}
+		out += s
+	}
+	return out
+}
+
+func stringContains(hay, needle string) bool {
+	return len(hay) >= len(needle) && search(hay, needle)
+}
+
+func search(hay, needle string) bool {
+	for i := 0; i+len(needle) <= len(hay); i++ {
+		if hay[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
 }

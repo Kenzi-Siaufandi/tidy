@@ -432,3 +432,17 @@ func TestReportDrift_TimestampOnlyChurnIgnored(t *testing.T) {
 		}
 	}
 }
+
+func TestStatePaths_RejectTraversal(t *testing.T) {
+	workDir := t.TempDir()
+	if _, err := statePluginPath(workDir, "../escape.jar"); err == nil {
+		t.Errorf("expected traversal rejection for plugin path")
+	}
+	if _, err := stateWorkdirPath(workDir, "/tmp/escape.jar"); err == nil {
+		// Absolute paths are rejected by SafeFilename (separators).
+		t.Errorf("expected rejection for absolute path")
+	}
+	if p, err := statePluginPath(workDir, "Good.jar"); err != nil || p == "" {
+		t.Errorf("expected Good.jar to be accepted: %v", err)
+	}
+}

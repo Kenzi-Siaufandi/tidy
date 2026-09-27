@@ -125,6 +125,73 @@ func isTidyInternal(p string) bool {
 	return p == ".tidy" || strings.HasPrefix(p, ".tidy/")
 }
 
+// rejectStateTraversal rejects absolute paths, parent traversals and
+// subdirectory separators so state-tracked filenames stay bare names.
+func rejectStateTraversal(raw string) error {
+	trimmed := raw
+	if filepath.IsAbs(trimmed) {
+		return fmt.Errorf("must not be absolute")
+	}
+	for _, part := range strings.Split(filepath.ToSlash(trimmed), "/") {
+		if part == ".." {
+			return fmt.Errorf("must not contain parent traversals")
+		}
+	}
+	if strings.Contains(trimmed, "/") || strings.Contains(trimmed, "\\") {
+		return fmt.Errorf("must be a bare filename")
+	}
+	return nil
+}
+
+// stateWorkdirPath joins a state-tracked bare filename under workDir after
+// sanitizing it, so a tampered .tidy/state.json can never drive deletions
+// outside the workdir.
+func stateWorkdirPath(workDir, raw string) (string, error) {
+	if err := rejectStateTraversal(raw); err != nil {
+		return "", fmt.Errorf("invalid state filename %q: %w", raw, err)
+	}
+	safe, err := resolver.SafeFilename(raw, "")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(workDir, safe), nil
+}
+
+// statePluginPath joins a state-tracked plugin filename under plugins/ after
+// sanitizing it.
+func statePluginPath(workDir, raw string) (string, error) {
+	if err := rejectStateTraversal(raw); err != nil {
+		return "", fmt.Errorf("invalid state filename %q: %w", raw, err)
+	}
+	safe, err := resolver.SafeFilename(raw, "")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(workDir, "plugins", safe), nil
+}
+
+// removeStateWorkdirFile removes a state-tracked file under workDir after
+// sanitizing. Invalid names are skipped with a warning instead of deleting
+// arbitrary paths.
+func removeStateWorkdirFile(workDir, raw string) {
+	p, err := stateWorkdirPath(workDir, raw)
+	if err != nil {
+		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: skipping removal of suspicious state filename %q: %v", raw, err)))
+		return
+	}
+	_ = os.Remove(p)
+}
+
+// removeStatePluginFile removes a state-tracked plugin jar after sanitizing.
+func removeStatePluginFile(workDir, raw string) {
+	p, err := statePluginPath(workDir, raw)
+	if err != nil {
+		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: skipping removal of suspicious state filename %q: %v", raw, err)))
+		return
+	}
+	_ = os.Remove(p)
+}
+
 // reportDrift snapshots working-tree drift versus the git remote into a
 // dated .tidy/drift-*.txt report and warns on console. It runs before Pull's
 // reset --hard, while the evidence still exists. Files substituted by the
@@ -481,8 +548,13 @@ func main() {
 	serverNeedsDownload := true
 	if previousState != nil && previousState.Server.Project == cfg.Server.Project && previousState.Server.Version == cfg.Server.Version {
 		// Server project and version match previous state. Verify local file existence and SHA-256.
-		localJar := filepath.Join(workDir, previousState.Server.Filename)
-		if state.VerifyLocalSHA256(localJar, previousState.Server.SHA256) {
+		// Sanitize the state-tracked filename so tampered state cannot probe outside files.
+		localJar, jarErr := stateWorkdirPath(workDir, previousState.Server.Filename)
+		if jarErr != nil {
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: suspicious server filename in state %q: %v", previousState.Server.Filename, jarErr)))
+			localJar = ""
+		}
+		if localJar != "" && state.VerifyLocalSHA256(localJar, previousState.Server.SHA256) {
 			requestedBuild := strings.TrimSpace(cfg.Server.Build)
 			if requestedBuild == "" {
 				requestedBuild = "latest"
@@ -506,7 +578,9 @@ func main() {
 				// A newer build falls through silently; the result prints below.
 			} else {
 				// Pinned build: skip only if stored build ID matches request.
-				if fmt.Sprintf("%d", previousState.Server.BuildID) == requestedBuild {
+				// BuildID 0 means unknown (e.g. legacy state): never treat as
+				// matching a "0" pin, force re-resolution instead.
+				if previousState.Server.BuildID != 0 && fmt.Sprintf("%d", previousState.Server.BuildID) == requestedBuild {
 					fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[=] Server: %s is up-to-date (SHA-256 verified, skipped download)", previousState.Server.Filename)))
 					activeServerFilename = previousState.Server.Filename
 					activeServerSHA256 = previousState.Server.SHA256
@@ -537,7 +611,7 @@ func main() {
 		activeServerBuildID = serverRes.BuildID
 		// Atomic upgrade: remove stale jar only after success and only if name changed.
 		if prevFilename != "" && prevFilename != activeServerFilename {
-			_ = os.Remove(filepath.Join(workDir, prevFilename))
+			removeStateWorkdirFile(workDir, prevFilename)
 		}
 	}
 
@@ -561,14 +635,18 @@ func main() {
 		for oldName, oldP := range previousState.Plugins {
 			if _, stillPresent := cfg.Plugins[oldName]; !stillPresent {
 				oldSource := strings.ToLower(strings.TrimSpace(oldP.Source))
-				oldPath := filepath.Join(workDir, "plugins", oldP.Filename)
+				oldPath, pathErr := statePluginPath(workDir, oldP.Filename)
 				if oldSource == "local" && strings.TrimSpace(oldP.Path) != "" {
 					if abs, _, err := resolver.ResolveLocalPath(config.PluginConfig{Path: oldP.Path}, workDir); err == nil {
-						oldPath = abs
+						oldPath, pathErr = abs, nil
+					} else {
+						pathErr = err
 					}
 				}
 				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[-] Plugin [%s]: Removed from tidy.toml. Deleting %s...", oldName, oldP.Filename)))
-				if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+				if pathErr != nil {
+					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: skipping removal of suspicious state filename %q: %v", oldP.Filename, pathErr)))
+				} else if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
 					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: failed to delete removed plugin %s: %v", oldPath, err)))
 				}
 			}
@@ -657,14 +735,19 @@ func main() {
 				}
 
 				if !configChanged && !isLatest {
-					localPath := filepath.Join(workDir, "plugins", oldP.Filename)
-					if source == "local" && strings.TrimSpace(oldP.Path) != "" {
+					localPath, pathErr := statePluginPath(workDir, oldP.Filename)
+					if pathErr != nil {
+						// Suspicious state filename: force re-download/verify.
+						localPath = ""
+					} else if source == "local" && strings.TrimSpace(oldP.Path) != "" {
 						if abs, _, err := resolver.ResolveLocalPath(config.PluginConfig{Path: oldP.Path}, workDir); err == nil {
 							localPath = abs
+						} else {
+							localPath = ""
 						}
 					}
 					// Check local file existence and SHA-256
-					if oldP.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldP.SHA256) {
+					if localPath != "" && oldP.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldP.SHA256) {
 						fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[=] Plugin [%s]: %s is up-to-date (SHA-256 verified, skipped download)", pluginName, oldP.Filename)))
 						installedPlugins[pluginName] = oldP
 						continue
@@ -693,7 +776,7 @@ func main() {
 					SHA256:          res.SHA256,
 				}
 				if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
-					_ = os.Remove(filepath.Join(workDir, "plugins", oldPlugin.Filename))
+					removeStatePluginFile(workDir, oldPlugin.Filename)
 				}
 				// The jar is swapped but the plugin's on-disk configs/data are
 				// left untouched, so a breaking update can load stale files.
@@ -716,8 +799,8 @@ func main() {
 					os.Exit(1)
 				}
 				if ver.ID == oldPlugin.VersionID {
-					localPath := filepath.Join(workDir, "plugins", oldPlugin.Filename)
-					if oldPlugin.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldPlugin.SHA256) {
+					localPath, pathErr := statePluginPath(workDir, oldPlugin.Filename)
+					if pathErr == nil && oldPlugin.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldPlugin.SHA256) {
 						fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[=] Plugin [%s]: %s is up-to-date (latest %s verified, skipped download)", pluginName, oldPlugin.Filename, ver.VersionNumber)))
 						installedPlugins[pluginName] = *oldPlugin
 						continue
@@ -764,7 +847,7 @@ func main() {
 				SHA256:   res.SHA256,
 			}
 			if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
-				_ = os.Remove(filepath.Join(workDir, "plugins", oldPlugin.Filename))
+				removeStatePluginFile(workDir, oldPlugin.Filename)
 			}
 		case "github":
 			storeGitHub := func(res *resolver.PluginDownloadResult) {
@@ -782,7 +865,7 @@ func main() {
 					SHA256:          res.SHA256,
 				}
 				if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
-					_ = os.Remove(filepath.Join(workDir, "plugins", oldPlugin.Filename))
+					removeStatePluginFile(workDir, oldPlugin.Filename)
 				}
 				// The jar is swapped but the plugin's on-disk configs/data are
 				// left untouched, so a breaking update can load stale files.
@@ -805,8 +888,8 @@ func main() {
 					os.Exit(1)
 				}
 				if strconv.FormatInt(rel.ID, 10) == oldPlugin.VersionID {
-					localPath := filepath.Join(workDir, "plugins", oldPlugin.Filename)
-					if oldPlugin.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldPlugin.SHA256) {
+					localPath, pathErr := statePluginPath(workDir, oldPlugin.Filename)
+					if pathErr == nil && oldPlugin.SHA256 != "" && state.VerifyLocalSHA256(localPath, oldPlugin.SHA256) {
 						fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[=] Plugin [%s]: %s is up-to-date (latest %s verified, skipped download)", pluginName, oldPlugin.Filename, rel.TagName)))
 						installedPlugins[pluginName] = *oldPlugin
 						continue
@@ -858,7 +941,11 @@ func main() {
 						oldAbs = abs
 					}
 				} else if oldPlugin.Filename != "" {
-					oldAbs = filepath.Join(workDir, "plugins", oldPlugin.Filename)
+					if p, err := statePluginPath(workDir, oldPlugin.Filename); err == nil {
+						oldAbs = p
+					} else {
+						fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: skipping removal of suspicious state filename %q: %v", oldPlugin.Filename, err)))
+					}
 				}
 				if oldAbs != "" && oldAbs != res.FilePath {
 					_ = os.Remove(oldAbs)

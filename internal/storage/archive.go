@@ -62,12 +62,14 @@ func extractZip(zipPath, destDir string) (int, error) {
 
 	cleanDest := filepath.Clean(destDir)
 	count := 0
+	entries := 0
 	var totalBytes int64
 
 	for _, f := range r.File {
-		if count >= MaxArchiveFiles {
+		if entries >= MaxArchiveFiles {
 			return count, fmt.Errorf("archive exceeds file limit of %d", MaxArchiveFiles)
 		}
+		entries++
 		targetPath := filepath.Join(cleanDest, f.Name)
 		// ZipSlip protection
 		if !strings.HasPrefix(filepath.Clean(targetPath), cleanDest+string(os.PathSeparator)) && filepath.Clean(targetPath) != cleanDest {
@@ -78,6 +80,8 @@ func extractZip(zipPath, destDir string) (int, error) {
 			if err := os.MkdirAll(targetPath, 0755); err != nil {
 				return count, err
 			}
+			// Directory entries count toward the limit via entries
+			// (inode exhaustion) but not toward the returned file count.
 			continue
 		}
 
@@ -152,6 +156,7 @@ func extractTar(tarPath, destDir string) (int, error) {
 func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 	cleanDest := filepath.Clean(destDir)
 	count := 0
+	entries := 0
 	var totalBytes int64
 
 	for {
@@ -162,6 +167,11 @@ func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 		if err != nil {
 			return count, fmt.Errorf("failed reading tar stream: %w", err)
 		}
+
+		if entries >= MaxArchiveFiles {
+			return count, fmt.Errorf("archive exceeds file limit of %d", MaxArchiveFiles)
+		}
+		entries++
 
 		targetPath := filepath.Join(cleanDest, header.Name)
 		// ZipSlip / TarSlip protection
@@ -174,8 +184,10 @@ func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 			if err := os.MkdirAll(targetPath, 0755); err != nil {
 				return count, err
 			}
+			// Directory entries count toward entries (inode exhaustion)
+			// but not toward the returned file count.
 		case tar.TypeReg:
-			if count >= MaxArchiveFiles {
+			if entries >= MaxArchiveFiles {
 				return count, fmt.Errorf("archive exceeds file limit of %d", MaxArchiveFiles)
 			}
 			if header.Size > MaxArchiveTotalBytes {

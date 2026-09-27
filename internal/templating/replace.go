@@ -109,6 +109,10 @@ func ProcessFile(path string) (int, []string, error) {
 // If customPaths is non-empty, only files matching those glob patterns
 // (relative to rootDir, supporting ** for recursive match) are processed.
 // If empty, it falls back to walking rootDir for all supported config files.
+//
+// Fault-tolerant: per-file errors are logged as warnings and skipped so one
+// unreadable file never leaves remaining configs unrendered. Only fatal
+// setup errors (e.g. root unreadable, invalid glob) abort the run.
 func ProcessDirectory(rootDir string, customPaths []string) (*ReplaceResult, error) {
 	result := &ReplaceResult{}
 
@@ -127,7 +131,8 @@ func ProcessDirectory(rootDir string, customPaths []string) (*ReplaceResult, err
 	for _, pat := range patterns {
 		files, err := expandPattern(rootDir, pat)
 		if err != nil {
-			return nil, err
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf(" [!] Templates warning: invalid pattern %q: %v", pat, err)))
+			continue
 		}
 		for _, f := range files {
 			clean := filepath.Clean(f)
@@ -136,7 +141,12 @@ func ProcessDirectory(rootDir string, customPaths []string) (*ReplaceResult, err
 			}
 			seen[clean] = struct{}{}
 			if err := processOneFile(rootDir, clean, result); err != nil {
-				return nil, err
+				rel := clean
+				if r, rerr := filepath.Rel(rootDir, clean); rerr == nil {
+					rel = r
+				}
+				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf(" [!] Templates warning: skipping %s: %v", rel, err)))
+				continue
 			}
 		}
 	}
@@ -148,7 +158,8 @@ func ProcessDirectory(rootDir string, customPaths []string) (*ReplaceResult, err
 func walkAll(rootDir string, result *ReplaceResult) error {
 	err := filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf(" [!] Templates warning: skipping %s: %v", path, err)))
+			return nil
 		}
 		if d.IsDir() {
 			name := d.Name()
@@ -163,7 +174,15 @@ func walkAll(rootDir string, result *ReplaceResult) error {
 			return nil
 		}
 
-		return processOneFileByAbs(rootDir, path, result)
+		if err := processOneFileByAbs(rootDir, path, result); err != nil {
+			rel := path
+			if r, rerr := filepath.Rel(rootDir, path); rerr == nil {
+				rel = r
+			}
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf(" [!] Templates warning: skipping %s: %v", rel, err)))
+			return nil
+		}
+		return nil
 	})
 
 	if err != nil {
@@ -195,7 +214,8 @@ func processOneFile(rootDir, absPath string, result *ReplaceResult) error {
 		// If a pattern matched a directory, walk it for supported files.
 		return filepath.WalkDir(absPath, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return err
+				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf(" [!] Templates warning: skipping %s: %v", p, err)))
+				return nil
 			}
 			if d.IsDir() {
 				if d.Name() == ".git" || d.Name() == ".tidy" || d.Name() == "cache" {
@@ -206,7 +226,15 @@ func processOneFile(rootDir, absPath string, result *ReplaceResult) error {
 			if !IsSupportedConfigFile(p) {
 				return nil
 			}
-			return processOneFileByAbs(rootDir, p, result)
+			if err := processOneFileByAbs(rootDir, p, result); err != nil {
+				rel := p
+				if r, rerr := filepath.Rel(rootDir, p); rerr == nil {
+					rel = r
+				}
+				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf(" [!] Templates warning: skipping %s: %v", rel, err)))
+				return nil
+			}
+			return nil
 		})
 	}
 	if !IsSupportedConfigFile(absPath) {

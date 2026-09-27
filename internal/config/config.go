@@ -362,7 +362,9 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Default template paths if none configured
+	// Default template paths if none configured. Must stay in sync with
+	// templating.IsSupportedConfigFile (.yml/.yaml/.properties/.json/.conf/
+	// .toml/.txt/.cfg/.env).
 	if len(c.Templates.Paths) == 0 {
 		c.Templates.Paths = []string{
 			"plugins/**/*.yml",
@@ -370,13 +372,28 @@ func (c *Config) Validate() error {
 			"plugins/**/*.properties",
 			"plugins/**/*.json",
 			"plugins/**/*.conf",
+			"plugins/**/*.toml",
+			"plugins/**/*.txt",
+			"plugins/**/*.cfg",
+			"plugins/**/*.env",
 			"config/**/*.yml",
 			"config/**/*.yaml",
+			"config/**/*.properties",
+			"config/**/*.json",
+			"config/**/*.conf",
+			"config/**/*.toml",
+			"config/**/*.txt",
+			"config/**/*.cfg",
+			"config/**/*.env",
 			"*.properties",
 			"*.yml",
 			"*.yaml",
 			"*.json",
 			"*.conf",
+			"*.toml",
+			"*.txt",
+			"*.cfg",
+			"*.env",
 		}
 	}
 

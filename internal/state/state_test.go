@@ -106,3 +106,29 @@ func TestVerifyLocalSHA256(t *testing.T) {
 		t.Errorf("expected VerifyLocalSHA256 to return false for missing file")
 	}
 }
+
+func TestSaveState_AtomicNoTmpLeft(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := &State{
+		Server:  ServerState{Project: "paper", Version: "26.2", BuildID: 1, Filename: "a.jar", SHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+		Plugins: map[string]PluginState{},
+		Files:   map[string]FileState{},
+	}
+	for i := 0; i < 3; i++ {
+		if err := SaveState(tmpDir, s); err != nil {
+			t.Fatalf("SaveState failed: %v", err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(tmpDir, ".tidy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if len(e.Name()) >= 4 && e.Name()[len(e.Name())-4:] == ".tmp" {
+			t.Errorf("temp file left behind: %s", e.Name())
+		}
+	}
+	if _, err := LoadState(tmpDir); err != nil {
+		t.Fatalf("saved state must load: %v", err)
+	}
+}

@@ -97,3 +97,28 @@ data:
 		t.Errorf("jar file was unexpectedly modified")
 	}
 }
+
+func TestProcessDirectory_FaultTolerant(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("FAULT_TEST_VAR", "ok")
+	goodDir := filepath.Join(tmpDir, "plugins", "Good")
+	if err := os.MkdirAll(goodDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	goodFile := filepath.Join(goodDir, "config.yml")
+	if err := os.WriteFile(goodFile, []byte("v: {{FAULT_TEST_VAR}}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Invalid glob must warn and continue, not abort the run.
+	res, err := ProcessDirectory(tmpDir, []string{"[invalid", "plugins/**/*.yml"})
+	if err != nil {
+		t.Fatalf("ProcessDirectory must not abort on invalid pattern: %v", err)
+	}
+	if res.Replacements != 1 {
+		t.Errorf("expected good file to still be processed, got %d replacements", res.Replacements)
+	}
+	data, _ := os.ReadFile(goodFile)
+	if !strings.Contains(string(data), "v: ok") {
+		t.Errorf("good file left unrendered after fault-tolerant run: %s", string(data))
+	}
+}
