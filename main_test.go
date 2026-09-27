@@ -83,6 +83,38 @@ func TestUniqueDriftReportName_SameSecondCollision(t *testing.T) {
 	}
 }
 
+func TestUniqueDriftReportName_BoundedOnExhaustion(t *testing.T) {
+	workDir := t.TempDir()
+	now := time.Date(2026, 9, 23, 5, 30, 24, 0, time.UTC)
+	if err := os.MkdirAll(filepath.Join(workDir, ".tidy"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	base := driftReportName(now)
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(base, driftReportPrefix), ".txt")
+	if err := os.WriteFile(filepath.Join(workDir, base), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= maxDriftReportAttempts; i++ {
+		p := filepath.Join(workDir, fmt.Sprintf("%s%s-%d.txt", driftReportPrefix, trimmed, i))
+		if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done := make(chan string, 1)
+	go func() { done <- uniqueDriftReportName(workDir, now) }()
+	select {
+	case got := <-done:
+		if got == base {
+			t.Errorf("exhausted suffix space must not reuse base %q", got)
+		}
+		if !strings.HasPrefix(got, driftReportPrefix) {
+			t.Errorf("fallback name %q must live under %q", got, driftReportPrefix)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("uniqueDriftReportName hung on suffix exhaustion")
+	}
+}
+
 func TestHasRealDiff(t *testing.T) {
 	tests := []struct {
 		name string

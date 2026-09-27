@@ -50,21 +50,41 @@ func driftReportName(now time.Time) string {
 	return driftReportPrefix + now.Format("2006-01-02_15-04-05") + ".txt"
 }
 
+// maxDriftReportAttempts bounds the same-second suffix probe so a .tidy
+// path conflict (file vs directory, permission errors, crash loops) can
+// never hang the boot sequence. Exhaustion falls back to a nanosecond
+// suffix below.
+const maxDriftReportAttempts = 100
+
 // uniqueDriftReportName keeps the agreed datetime format but avoids losing
 // history when two runs land in the same second (crash loops): the second
 // run gets drift-...-1.txt, then -2, and so on.
 func uniqueDriftReportName(workDir string, now time.Time) string {
 	base := driftReportName(now)
-	if _, err := os.Stat(filepath.Join(workDir, base)); os.IsNotExist(err) {
-		return base
+	if _, err := os.Stat(filepath.Join(workDir, base)); err != nil {
+		if os.IsNotExist(err) {
+			return base
+		}
+		// Stat failed for another reason (permissions, .tidy is a file,
+		// I/O error): do not spin probing. Return a nanosecond-suffixed
+		// name so the boot proceeds; the write itself is best-effort.
+		return fmt.Sprintf("%s%s-%d.txt", driftReportPrefix,
+			strings.TrimSuffix(strings.TrimPrefix(base, driftReportPrefix), ".txt"),
+			now.UnixNano()%1000000)
 	}
 	trimmed := strings.TrimSuffix(strings.TrimPrefix(base, driftReportPrefix), ".txt")
-	for i := 1; ; i++ {
+	for i := 1; i <= maxDriftReportAttempts; i++ {
 		candidate := fmt.Sprintf("%s%s-%d.txt", driftReportPrefix, trimmed, i)
-		if _, err := os.Stat(filepath.Join(workDir, candidate)); os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(workDir, candidate)); err != nil {
+			if os.IsNotExist(err) {
+				return candidate
+			}
+			// Non-NotExist stat error: stop probing, use this candidate.
 			return candidate
 		}
 	}
+	// Suffix space exhausted: nanosecond fallback guarantees progress.
+	return fmt.Sprintf("%s%s-%d.txt", driftReportPrefix, trimmed, now.UnixNano())
 }
 
 // volatileDateComment matches the timestamp line java.util.Properties.store()
