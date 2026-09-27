@@ -41,7 +41,8 @@ Single static Go CLI (`main.go` only entrypoint). Flow: git sync → load `tidy.
 ## Artifacts / CI
 
 - `.gitignore`: `tidy` binary, `*.jar`, `*.tidy-tmp`, `plugins/`, `logs/`, `world/`, `cache/`, `.tidy/`, `.env*`, `test-workspace/`. Don't commit server artifacts or state.
-- Docker: multi-stage `golang:1.27.1-alpine` → `ghcr.io/pterodactyl/yolks:java_25`. CI (`.github/workflows/docker.yml`) pushes `ghcr.io/<repo>:java25` on `main` push / `v*` tags. Startup: `tidy && exec java ...` (see `egg-tidy-paper.json`, panel-managed — don't hand-edit).
+- Docker: multi-stage `golang:1.27.1-alpine` → `ghcr.io/pterodactyl/yolks:java_25`. CI (`.github/workflows/docker.yml`) pushes `ghcr.io/<repo>:java25` on every `main` push / `v*` tag, plus `:latest` on `main` and the semver tag on `v*`. Startup: `tidy && exec java ...` (see `egg-tidy.json`, panel-managed — don't hand-edit).
+- Releases: `release.yml` builds all five CLI targets sequentially in one job on `v*` tags (no matrix) and attaches binaries + per-binary `.sha256` to the release with generated notes. Sequential on purpose — parallel legs raced to create the release without notes.
 
 ## Commits
 
