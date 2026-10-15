@@ -321,6 +321,26 @@ func (c *Client) DiffTracked(ctx context.Context, dir, relPath string) (string, 
 	return string(out), nil
 }
 
+// ShowHeadFile returns the HEAD blob for a repo-relative path (raw committed
+// content with {{VAR}} placeholders intact). Best-effort for drift masking:
+// callers fall back to unmasked behavior when it fails.
+func (c *Client) ShowHeadFile(ctx context.Context, dir, relPath string) (string, error) {
+	relPath = filepath.ToSlash(strings.TrimSpace(relPath))
+	if relPath == "" {
+		return "", fmt.Errorf("file path cannot be empty")
+	}
+	cmd := exec.CommandContext(ctx, c.GitPath, "show", "HEAD:"+relPath)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git show failed in %s: %w", dir, err)
+	}
+	if strings.IndexByte(string(out), 0) >= 0 {
+		return "", nil
+	}
+	return string(out), nil
+}
+
 // parsePorcelainDrift splits porcelain status output into tracked
 // modifications versus untracked files. Ignored ("!!") entries are skipped.
 // Rename entries ("R  old -> new") resolve to the new path; quoted paths
@@ -366,6 +386,72 @@ func cleanPorcelainPath(raw string) string {
 		}
 	}
 	return filepath.ToSlash(raw)
+}
+
+// parseDiffNameStatus parses `git diff --name-status` output on tab
+// delimiters (not whitespace Fields, which break on spaces in paths).
+// Quoted paths are unquoted via cleanPorcelainPath, and renames/copies
+// (`R100\told\tnew`) resolve to the new path with status "R"/"C".
+func parseDiffNameStatus(out string) []FileChange {
+	var changed []FileChange
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var statusRaw, path string
+		if strings.Contains(line, "\t") {
+			parts := strings.Split(line, "\t")
+			if len(parts) < 2 {
+				continue
+			}
+			statusRaw = strings.TrimSpace(parts[0])
+			if statusRaw == "" {
+				continue
+			}
+			// Rename/copy: R<score>\told\tnew -> record new path.
+			if len(statusRaw) > 0 && (statusRaw[0] == 'R' || statusRaw[0] == 'C') {
+				if len(parts) >= 3 {
+					path = cleanPorcelainPath(parts[len(parts)-1])
+				} else {
+					path = cleanPorcelainPath(parts[1])
+				}
+				changed = append(changed, FileChange{
+					Status: string(statusRaw[0]),
+					Path:   path,
+				})
+				continue
+			}
+			path = cleanPorcelainPath(parts[1])
+			if path == "" {
+				continue
+			}
+			changed = append(changed, FileChange{
+				Status: statusRaw,
+				Path:   path,
+			})
+			continue
+		}
+		// Fallback for unexpected space-separated output.
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		statusRaw = parts[0]
+		if len(statusRaw) > 0 && (statusRaw[0] == 'R' || statusRaw[0] == 'C') {
+			path = cleanPorcelainPath(parts[len(parts)-1])
+			changed = append(changed, FileChange{
+				Status: string(statusRaw[0]),
+				Path:   path,
+			})
+			continue
+		}
+		changed = append(changed, FileChange{
+			Status: statusRaw,
+			Path:   cleanPorcelainPath(parts[1]),
+		})
+	}
+	return changed
 }
 
 // isDirEmpty returns true if a directory does not exist or has no entries.
@@ -555,31 +641,33 @@ func (c *Client) Pull(ctx context.Context, opts Options) (*PullResult, error) {
 		}, nil
 	}
 
-	// 3. Inspect commit messages
+	// 3. Inspect commit messages. With --depth 10 the old commit may fall
+	// outside the shallow window, so log/diff can fail; degrade gracefully
+	// with a warning and empty details instead of misreporting.
 	logCmd := exec.CommandContext(ctx, c.GitPath, "log", "--oneline", fmt.Sprintf("%s..%s", oldCommit, newCommit))
 	logCmd.Dir = opts.TargetDir
-	logOut, _ := logCmd.Output()
+	logOut, logErr := logCmd.Output()
 	var commits []string
-	for _, line := range strings.Split(strings.TrimSpace(string(logOut)), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			commits = append(commits, line)
+	if logErr != nil {
+		fmt.Fprintf(os.Stderr, "[!] Warning: git log %s..%s failed (old commit outside shallow history?); continuing without commit details.\n", ShortSHA(oldCommit), ShortSHA(newCommit))
+	} else {
+		for _, line := range strings.Split(strings.TrimSpace(string(logOut)), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				commits = append(commits, line)
+			}
 		}
 	}
 
-	// 4. Inspect changed files
+	// 4. Inspect changed files (tab-delimited, rename-aware).
 	diffCmd := exec.CommandContext(ctx, c.GitPath, "diff", "--name-status", oldCommit, newCommit)
 	diffCmd.Dir = opts.TargetDir
-	diffOut, _ := diffCmd.Output()
+	diffOut, diffErr := diffCmd.Output()
 	var changedFiles []FileChange
-	for _, line := range strings.Split(strings.TrimSpace(string(diffOut)), "\n") {
-		parts := strings.Fields(line)
-		if len(parts) >= 2 {
-			changedFiles = append(changedFiles, FileChange{
-				Status: parts[0],
-				Path:   parts[1],
-			})
-		}
+	if diffErr != nil {
+		fmt.Fprintf(os.Stderr, "[!] Warning: git diff --name-status %s %s failed (old commit outside shallow history?); continuing without file details.\n", ShortSHA(oldCommit), ShortSHA(newCommit))
+	} else {
+		changedFiles = parseDiffNameStatus(string(diffOut))
 	}
 
 	// 5. Fast-forward / reset working tree to FETCH_HEAD
