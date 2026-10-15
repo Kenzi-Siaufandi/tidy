@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -174,6 +175,18 @@ func safeRemoveOldFile(workDir, oldRaw, newAbs string, isPlugin bool) {
 // config (local source only; remote sources resolve filenames at download
 // time so "" is returned). Used to avoid deleting a file still referenced
 // after a key rename.
+
+// sortedKeys returns map keys in deterministic order so progress output and
+// the first fatal error do not depend on Go map iteration order.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func activePluginFilename(pCfg config.PluginConfig, workDir string) string {
 	if strings.ToLower(strings.TrimSpace(pCfg.Source)) != "local" {
 		return ""
@@ -483,7 +496,8 @@ func main() {
 				activeFilenames[fn] = true
 			}
 		}
-		for oldName, oldP := range previousState.Plugins {
+		for _, oldName := range sortedKeys(previousState.Plugins) {
+			oldP := previousState.Plugins[oldName]
 			if _, stillPresent := cfg.Plugins[oldName]; !stillPresent {
 				oldSource := strings.ToLower(strings.TrimSpace(oldP.Source))
 				if oldSource == "local" {
@@ -514,7 +528,8 @@ func main() {
 	}
 
 	// B. Reconcile active plugins in tidy.toml
-	for pluginName, pCfg := range cfg.Plugins {
+	for _, pluginName := range sortedKeys(cfg.Plugins) {
+		pCfg := cfg.Plugins[pluginName]
 		source := strings.ToLower(strings.TrimSpace(pCfg.Source))
 		var oldPlugin *state.PluginState
 		var configChanged bool
@@ -815,7 +830,8 @@ func main() {
 	installedFiles := make(map[string]state.FileState)
 	if len(allFiles) > 0 {
 		storageMgr := storage.NewManager(nil)
-		for name, fCfg := range allFiles {
+		for _, name := range sortedKeys(allFiles) {
+			fCfg := allFiles[name]
 			var prevFile *state.FileState
 			if previousState != nil {
 				if pf, ok := previousState.Files[name]; ok {
