@@ -1,5 +1,6 @@
 # Stage 1: Build the static Tidy binary
 FROM golang:1.27.1-alpine AS builder
+ARG TARGETARCH
 
 WORKDIR /build
 
@@ -9,7 +10,7 @@ RUN go mod download
 
 # Copy source code and build statically linked stripped binary
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /build/tidy main.go
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o /build/tidy main.go
 
 # Stage 2: Runtime image targeting Java 25 on Pterodactyl Yolks
 FROM ghcr.io/pterodactyl/yolks:java_25
