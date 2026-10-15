@@ -27,6 +27,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test ./...
+
       - name: Build tidy CLI for every platform
         env:
           CGO_ENABLED: 0
