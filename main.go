@@ -1,17 +1,13 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/config"
@@ -32,135 +28,6 @@ const Version = version.Version
 // driftReportDir holds the panel-viewable drift reports: one file per drift
 // event (clean runs write nothing), never pruned, so old reports remain as
 // history without cluttering .tidy itself.
-const driftReportDir = ".tidy/drift"
-
-// driftReportPrefix names the drift reports inside driftReportDir.
-const driftReportPrefix = ".tidy/drift/drift-"
-
-// runLogDir holds one console-output log per tidy run, never pruned.
-const runLogDir = ".tidy/log"
-
-// runLogPrefix names the per-run logs inside runLogDir.
-const runLogPrefix = ".tidy/log/tidy-"
-
-// driftReportCap bounds each report section so messy servers stay readable.
-const driftReportCap = 50
-
-// driftDiffFilesCap bounds how many files get full diffs in a report. The
-// name lists above always cover every file; diffs are the troubleshooting
-// payload and the expensive part, so only the first N (sorted) are shown.
-const driftDiffFilesCap = 10
-
-// driftDiffLinesCap bounds each file's diff so one huge config can't flood
-// the panel disk (reports are never pruned).
-const driftDiffLinesCap = 80
-
-// maxRetainedRunLogs caps .tidy/log/ retention (N=50): every run writes one
-// file, crash loops would otherwise fill disk/inodes.
-const maxRetainedRunLogs = 50
-
-// maxRetainedDriftReports caps .tidy/drift/ retention (N=50).
-const maxRetainedDriftReports = 50
-
-// driftReportName returns the report path for a run timestamp, e.g.
-// .tidy/drift/drift-2026-09-23_05-30-24.txt. Hyphens keep it shell/panel-safe.
-func driftReportName(now time.Time) string {
-	return driftReportPrefix + now.Format("2006-01-02_15-04-05") + ".txt"
-}
-
-// runLogName returns the run-log path for a timestamp, e.g.
-// .tidy/log/tidy-2026-09-23_05-30-24.log.
-func runLogName(now time.Time) string {
-	return runLogPrefix + now.Format("2006-01-02_15-04-05") + ".log"
-}
-
-// maxDriftReportAttempts bounds the same-second suffix probe so a .tidy
-// path conflict (file vs directory, permission errors, crash loops) can
-// never hang the boot sequence. Exhaustion falls back to a nanosecond
-// suffix below. Shared by drift reports and run logs.
-const maxDriftReportAttempts = 100
-
-// uniqueDatedName keeps the agreed datetime format but avoids losing
-// history when two runs land in the same second (crash loops): the second
-// run gets ...-1.txt, then -2, and so on.
-func uniqueDatedName(workDir, prefix, base, ext string, now time.Time) string {
-	if _, err := os.Stat(filepath.Join(workDir, base)); err != nil {
-		if os.IsNotExist(err) {
-			return base
-		}
-		// Stat failed for another reason (permissions, .tidy is a file,
-		// I/O error): do not spin probing. Return a nanosecond-suffixed
-		// name so the boot proceeds; the write itself is best-effort.
-		return fmt.Sprintf("%s%s-%d%s", prefix,
-			strings.TrimSuffix(strings.TrimPrefix(base, prefix), ext),
-			now.UnixNano()%1000000, ext)
-	}
-	trimmed := strings.TrimSuffix(strings.TrimPrefix(base, prefix), ext)
-	for i := 1; i <= maxDriftReportAttempts; i++ {
-		candidate := fmt.Sprintf("%s%s-%d%s", prefix, trimmed, i, ext)
-		if _, err := os.Stat(filepath.Join(workDir, candidate)); err != nil {
-			if os.IsNotExist(err) {
-				return candidate
-			}
-			// Non-NotExist stat error: stop probing, use this candidate.
-			return candidate
-		}
-	}
-	// Suffix space exhausted: nanosecond fallback guarantees progress.
-	return fmt.Sprintf("%s%s-%d%s", prefix, trimmed, now.UnixNano(), ext)
-}
-
-// uniqueDriftReportName keeps the agreed datetime format but avoids losing
-// history when two runs land in the same second (crash loops): the second
-// run gets drift-...-1.txt, then -2, and so on.
-func uniqueDriftReportName(workDir string, now time.Time) string {
-	return uniqueDatedName(workDir, driftReportPrefix, driftReportName(now), ".txt", now)
-}
-
-// uniqueRunLogName is the run-log counterpart: same-second runs get
-// tidy-...-1.log, then -2, and so on.
-func uniqueRunLogName(workDir string, now time.Time) string {
-	return uniqueDatedName(workDir, runLogPrefix, runLogName(now), ".log", now)
-}
-
-// volatileDateComment matches the timestamp line java.util.Properties.store()
-// rewrites atop server.properties on every save, e.g.
-// "#Sun Sep 20 14:03:06 WIB 2026". It changes on every boot with no real
-// config change, so drift detection ignores it (vanilla behavior, not
-// Pterodactyl — and no server option disables it).
-var volatileDateComment = regexp.MustCompile(`^#[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}:\d{2} \S+ \d{4}$`)
-
-// hasRealDiff reports whether a unified diff contains any change beyond
-// volatile date comments. Headers (+++ / --- / @@ / diff --git / index) and
-// context lines never count; a binary-change marker always counts.
-func hasRealDiff(diff string) bool {
-	for _, l := range strings.Split(diff, "\n") {
-		switch {
-		case l == "",
-			strings.HasPrefix(l, "+++"), strings.HasPrefix(l, "---"),
-			strings.HasPrefix(l, "@@"), strings.HasPrefix(l, "diff --git"),
-			strings.HasPrefix(l, "index "):
-			continue
-		case strings.HasPrefix(l, "Binary files "):
-			return true
-		case strings.HasPrefix(l, "+") || strings.HasPrefix(l, "-"):
-			if volatileDateComment.MatchString(strings.TrimSpace(l[1:])) {
-				continue
-			}
-			return true
-		}
-	}
-	return false
-}
-
-// isTidyInternal reports whether a repo-relative path is Tidy's own runtime
-// state (.tidy/). Those files exist only locally and never on the remote, so
-// they are pollution in a drift report, not drift.
-func isTidyInternal(p string) bool {
-	p = strings.TrimPrefix(p, "./")
-	return p == ".tidy" || strings.HasPrefix(p, ".tidy/")
-}
-
 // rejectStateTraversal rejects absolute paths, parent traversals and
 // subdirectory separators so state-tracked filenames stay bare names.
 func rejectStateTraversal(raw string) error {
@@ -182,6 +49,9 @@ func rejectStateTraversal(raw string) error {
 // stateWorkdirPath joins a state-tracked bare filename under workDir after
 // sanitizing it, so a tampered .tidy/state.json can never drive deletions
 // outside the workdir.
+// stateWorkdirPath joins a state-tracked bare filename under workDir after
+// sanitizing it, so a tampered .tidy/state.json can never drive deletions
+// outside the workdir.
 func stateWorkdirPath(workDir, raw string) (string, error) {
 	if err := rejectStateTraversal(raw); err != nil {
 		return "", fmt.Errorf("invalid state filename %q: %w", raw, err)
@@ -193,6 +63,8 @@ func stateWorkdirPath(workDir, raw string) (string, error) {
 	return filepath.Join(workDir, safe), nil
 }
 
+// statePluginPath joins a state-tracked plugin filename under plugins/ after
+// sanitizing it.
 // statePluginPath joins a state-tracked plugin filename under plugins/ after
 // sanitizing it.
 func statePluginPath(workDir, raw string) (string, error) {
@@ -209,6 +81,9 @@ func statePluginPath(workDir, raw string) (string, error) {
 // removeStateWorkdirFile removes a state-tracked file under workDir after
 // sanitizing. Invalid names are skipped with a warning instead of deleting
 // arbitrary paths.
+// removeStateWorkdirFile removes a state-tracked file under workDir after
+// sanitizing. Invalid names are skipped with a warning instead of deleting
+// arbitrary paths.
 func removeStateWorkdirFile(workDir, raw string) {
 	p, err := stateWorkdirPath(workDir, raw)
 	if err != nil {
@@ -218,6 +93,7 @@ func removeStateWorkdirFile(workDir, raw string) {
 	_ = os.Remove(p)
 }
 
+// removeStatePluginFile removes a state-tracked plugin jar after sanitizing.
 // removeStatePluginFile removes a state-tracked plugin jar after sanitizing.
 func removeStatePluginFile(workDir, raw string) {
 	p, err := statePluginPath(workDir, raw)
@@ -235,329 +111,6 @@ func removeStatePluginFile(workDir, raw string) {
 // only written when drift exists, so clean boots leave no files behind and
 // history stays bounded to real events (never pruned).
 // Best-effort: never fails the boot.
-func reportDrift(ctx context.Context, gitClient *git.Client, workDir, configFlag string, previousState *state.State) {
-	drift, err := gitClient.StatusDrift(ctx, workDir)
-	if err != nil {
-		return
-	}
-	templated := make(map[string]bool)
-	if previousState != nil {
-		for _, p := range previousState.TemplatedFiles {
-			if s := strings.TrimSpace(p); s != "" {
-				templated[s] = true
-			}
-		}
-	}
-	var modified []string
-	var churnSkipped int
-	diffs := make(map[string]string)
-	for _, p := range drift.Modified {
-		if isTidyInternal(p) {
-			continue
-		}
-		d, err := gitClient.DiffTracked(ctx, workDir, p)
-		if err != nil {
-			modified = append(modified, p)
-			continue
-		}
-		if !hasRealDiff(d) {
-			// Timestamp-only churn (e.g. the server.properties date
-			// header the server rewrites on every boot): not drift.
-			churnSkipped++
-			continue
-		}
-		// Templated files need masking, not skipping: re-apply template
-		// substitution to the HEAD blob in memory and compare against the
-		// working file. Pure templating differences are expected-dirty;
-		// real user edits are reported with secrets masked.
-		if templated[p] || previousState == nil {
-			masked, isOnlyTemplate := maskedTemplatedDiff(ctx, gitClient, workDir, p, d)
-			if isOnlyTemplate {
-				churnSkipped++
-				continue
-			}
-			if masked != "" {
-				d = masked
-			}
-			// previousState==nil means we cannot know templated set:
-			// still mask any file whose HEAD contains {{VAR}}.
-			if previousState == nil && masked == "" && !templated[p] {
-				if m, ok := maskSecretsInDiff(ctx, gitClient, workDir, p, d); ok {
-					d = m
-				}
-			}
-		}
-		modified = append(modified, p)
-		diffs[p] = d
-	}
-	var untracked []string
-	for _, p := range drift.Untracked {
-		if !isTidyInternal(p) {
-			untracked = append(untracked, p)
-		}
-	}
-	if len(modified)+len(untracked) == 0 {
-		return
-	}
-	now := time.Now()
-	reportName := uniqueDriftReportName(workDir, now)
-	writeDriftReport(workDir, reportName, now, modified, untracked, diffs, churnSkipped)
-	if rel := configRelPath(workDir, configFlag); rel != "" {
-		for _, p := range modified {
-			if p == rel {
-				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Git: local %s differs from the remote and will be discarded by sync — commit it to keep it", rel)))
-				break
-			}
-		}
-	}
-	fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Git: %d file(s) differ from the remote — see %s",
-		len(modified)+len(untracked), reportName)))
-}
-
-// maskedTemplatedDiff compares the working file against the HEAD blob with
-// template substitution re-applied in memory. It returns (maskedDiff, true)
-// when the only differences are templating + volatile date comments
-// (expected-dirty, skip), or (maskedDiff, false) when real user edits exist.
-// maskedDiff has secret env values replaced with {{VAR}} so drift reports
-// never leak plaintext secrets into world-readable files.
-func maskedTemplatedDiff(ctx context.Context, gitClient *git.Client, workDir, relPath, rawDiff string) (string, bool) {
-	head, err := gitClient.ShowHeadFile(ctx, workDir, relPath)
-	if err != nil || head == "" {
-		// Cannot mask without HEAD: keep raw diff (caller reports it).
-		return "", false
-	}
-	if !strings.Contains(head, "{{") {
-		return "", false
-	}
-	expected, _, _ := templating.ReplaceString(head)
-	workBytes, err := os.ReadFile(filepath.Join(workDir, filepath.FromSlash(relPath)))
-	if err != nil {
-		return "", false
-	}
-	if contentsEqualIgnoringVolatile(expected, string(workBytes)) {
-		return "", true
-	}
-	// Previous run's env may differ from current (or test env unset):
-	// if working matches the HEAD template shape (literals in order),
-	// it is pure templating output, not a panel edit.
-	if templateShapeMatches(head, string(workBytes)) {
-		return "", true
-	}
-	return maskValuesInText(rawDiff, placeholdersIn(head)), false
-}
-
-// maskSecretsInDiff masks secret values in a diff for files whose HEAD
-// contains {{VAR}} placeholders. ok=false when no masking applied.
-func maskSecretsInDiff(ctx context.Context, gitClient *git.Client, workDir, relPath, rawDiff string) (string, bool) {
-	head, err := gitClient.ShowHeadFile(ctx, workDir, relPath)
-	if err != nil || head == "" || !strings.Contains(head, "{{") {
-		return "", false
-	}
-	return maskValuesInText(rawDiff, placeholdersIn(head)), true
-}
-
-// placeholdersIn returns distinct {{VAR}} names found in content.
-func placeholdersIn(content string) []string {
-	var out []string
-	seen := map[string]bool{}
-	for _, m := range templating.MustacheVariableRegex.FindAllStringSubmatch(content, -1) {
-		if len(m) < 2 || seen[m[1]] {
-			continue
-		}
-		seen[m[1]] = true
-		out = append(out, m[1])
-	}
-	return out
-}
-
-// maskValuesInText replaces non-empty env values for vars with {{VAR}} so
-// reports show the placeholder instead of the secret.
-func maskValuesInText(text string, vars []string) string {
-	for _, v := range vars {
-		if val, ok := os.LookupEnv(v); ok && val != "" && len(val) >= 3 {
-			text = strings.ReplaceAll(text, val, "{{"+v+"}}")
-		}
-	}
-	return text
-}
-
-// templateShapeMatches reports whether working could be head with every
-// {{VAR}} replaced by some value: all literal segments between placeholders
-// appear in order. Distinguishes pure templating output (previous run's env,
-// possibly unset now) from real panel edits elsewhere.
-func templateShapeMatches(head, working string) bool {
-	locs := templating.MustacheVariableRegex.FindAllStringIndex(head, -1)
-	if len(locs) == 0 {
-		return false
-	}
-	var lits []string
-	prev := 0
-	for _, l := range locs {
-		lits = append(lits, head[prev:l[0]])
-		prev = l[1]
-	}
-	lits = append(lits, head[prev:])
-	pos := 0
-	for i, lit := range lits {
-		if lit == "" {
-			continue
-		}
-		if i == 0 {
-			if strings.HasPrefix(working[pos:], lit) {
-				pos += len(lit)
-				continue
-			}
-			idx := strings.Index(working[pos:], lit)
-			if idx < 0 {
-				return false
-			}
-			pos += idx + len(lit)
-			continue
-		}
-		if i == len(lits)-1 {
-			if lit == "\n" {
-				return true
-			}
-			return strings.HasSuffix(working, lit) || strings.Contains(working[pos:], lit)
-		}
-		idx := strings.Index(working[pos:], lit)
-		if idx < 0 {
-			return false
-		}
-		pos += idx + len(lit)
-	}
-	return true
-}
-
-// contentsEqualIgnoringVolatile compares two file contents ignoring volatile
-// date-comment lines (server.properties header rewritten every boot).
-func contentsEqualIgnoringVolatile(a, b string) bool {
-	strip := func(s string) string {
-		var kept []string
-		for _, l := range strings.Split(s, "\n") {
-			t := strings.TrimRight(l, "\r")
-			if volatileDateComment.MatchString(strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(t, "+"), "-"))) {
-				continue
-			}
-			if volatileDateComment.MatchString(strings.TrimSpace(t)) {
-				continue
-			}
-			kept = append(kept, t)
-		}
-		return strings.Join(kept, "\n")
-	}
-	return strip(a) == strip(b)
-}
-
-// configRelPath returns the config path repo-relative in slash form, or ""
-// when it lives outside the workdir (no remote to diff against).
-func configRelPath(workDir, configFlag string) string {
-	rel := strings.TrimSpace(configFlag)
-	if rel == "" {
-		return ""
-	}
-	if filepath.IsAbs(rel) {
-		r, err := filepath.Rel(workDir, rel)
-		if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
-			return ""
-		}
-		rel = r
-	}
-	return filepath.ToSlash(rel)
-}
-
-// formatDriftReport renders the panel-viewable drift report body.
-// Timestamps are local so they match the panel console and the filename.
-// diffs holds per-file `git diff HEAD` output for troubleshooting what the
-// sync discarded; files without an entry render as "(diff unavailable)".
-func formatDriftReport(modified, untracked []string, diffs map[string]string, churnSkipped int, now time.Time) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "# Tidy drift report — %s\n", now.Format("2006-01-02 15:04:05 -0700"))
-	b.WriteString("# Written before the git sync.\n")
-	b.WriteString("# 'Discarded' files are tracked and were reset (reset --hard): commit them to keep them.\n")
-	b.WriteString("# 'Kept' files are untracked: git left them alone, but the remote does not know them.\n")
-	b.WriteString("# Files templated ({{VAR}}) show masked diffs (secrets as {{VAR}}); pure templating is filtered.\n")
-	b.WriteString("# Diffs below are what the sync discarded (unified diff vs HEAD).\n")
-	if churnSkipped > 0 {
-		fmt.Fprintf(&b, "# %d file(s) differed only by volatile date comments (e.g. the server.properties header) and were ignored.\n", churnSkipped)
-	}
-	writeDriftSection(&b, "Discarded on sync (tracked, locally modified)", modified)
-	writeDriftSection(&b, "Kept locally (untracked, not in git)", untracked)
-	writeDiffSection(&b, modified, diffs)
-	return b.String()
-}
-
-func writeDriftSection(b *strings.Builder, title string, paths []string) {
-	fmt.Fprintf(b, "\n## %s (%d)\n", title, len(paths))
-	if len(paths) == 0 {
-		b.WriteString("(none)\n")
-		return
-	}
-	shown := paths
-	extra := ""
-	if len(shown) > driftReportCap {
-		shown = shown[:driftReportCap]
-		extra = fmt.Sprintf("(and %d more)\n", len(paths)-driftReportCap)
-	}
-	for _, p := range shown {
-		b.WriteString(p + "\n")
-	}
-	b.WriteString(extra)
-}
-
-// writeDiffSection renders the troubleshooting payload: what the sync
-// discarded, per tracked file. Only the first driftDiffFilesCap files get
-// diffs; each diff is capped at driftDiffLinesCap lines.
-func writeDiffSection(b *strings.Builder, modified []string, diffs map[string]string) {
-	fmt.Fprintf(b, "\n## Changes that will be lost (diff vs HEAD, first %d files)\n", driftDiffFilesCap)
-	if len(modified) == 0 {
-		b.WriteString("(none)\n")
-		return
-	}
-	shown := modified
-	if len(shown) > driftDiffFilesCap {
-		shown = shown[:driftDiffFilesCap]
-	}
-	for _, p := range shown {
-		fmt.Fprintf(b, "\n### %s\n", p)
-		d, ok := diffs[p]
-		if !ok {
-			b.WriteString("(diff unavailable)\n")
-			continue
-		}
-		d = strings.TrimRight(d, "\n")
-		if d == "" {
-			b.WriteString("(no textual diff)\n")
-			continue
-		}
-		lines := strings.Split(d, "\n")
-		if len(lines) > driftDiffLinesCap {
-			for _, l := range lines[:driftDiffLinesCap] {
-				b.WriteString(l + "\n")
-			}
-			fmt.Fprintf(b, "(... truncated, %d more lines)\n", len(lines)-driftDiffLinesCap)
-		} else {
-			for _, l := range lines {
-				b.WriteString(l + "\n")
-			}
-		}
-	}
-	if len(modified) > len(shown) {
-		fmt.Fprintf(b, "\n(and diffs for %d more file(s) omitted)\n", len(modified)-len(shown))
-	}
-}
-
-// writeDriftReport persists the dated drift report under .tidy/drift.
-// Best-effort. Retention is capped at maxRetainedDriftReports (N=50).
-func writeDriftReport(workDir, reportName string, now time.Time, modified, untracked []string, diffs map[string]string, churnSkipped int) {
-	if err := os.MkdirAll(filepath.Join(workDir, driftReportDir), 0755); err != nil {
-		return
-	}
-	content := formatDriftReport(modified, untracked, diffs, churnSkipped, now)
-	_ = os.WriteFile(filepath.Join(workDir, reportName), []byte(content), 0644)
-	pruneOldFiles(filepath.Join(workDir, driftReportDir), "drift-", ".txt", maxRetainedDriftReports)
-}
-
 // sameFileOnDisk reports whether two absolute paths resolve to the same file
 func sameFileOnDisk(a, b string) bool {
 	if a == "" || b == "" {
@@ -577,6 +130,9 @@ func sameFileOnDisk(a, b string) bool {
 	return os.SameFile(ai, bi)
 }
 
+// safeRemoveOldFile removes oldAbs only when it is not the same file as
+// newAbs (SameFile or case-only name match). Returns true when a delete was
+// attempted.
 // safeRemoveOldFile removes oldAbs only when it is not the same file as
 // newAbs (SameFile or case-only name match). Returns true when a delete was
 // attempted.
@@ -614,6 +170,10 @@ func safeRemoveOldFile(workDir, oldRaw, newAbs string, isPlugin bool) {
 // config (local source only; remote sources resolve filenames at download
 // time so "" is returned). Used to avoid deleting a file still referenced
 // after a key rename.
+// activePluginFilename returns a best-effort filename for an active plugin
+// config (local source only; remote sources resolve filenames at download
+// time so "" is returned). Used to avoid deleting a file still referenced
+// after a key rename.
 func activePluginFilename(pCfg config.PluginConfig, workDir string) string {
 	if strings.ToLower(strings.TrimSpace(pCfg.Source)) != "local" {
 		return ""
@@ -622,194 +182,6 @@ func activePluginFilename(pCfg config.PluginConfig, workDir string) string {
 		return fn
 	}
 	return ""
-}
-
-// ansiSGR matches SGR color codes (see internal/ui) so run logs stay plain
-// text while the panel console keeps its colors.
-var ansiSGR = regexp.MustCompile("\x1b\\[[0-9;]*[A-Za-z]")
-
-var (
-	runLogFile  *os.File
-	runLogPipes []*os.File
-	runLogWait  sync.WaitGroup
-)
-
-// startRunLog tees this run's stdout/stderr into
-// .tidy/log/tidy-YYYY-MM-DD_HH-MM-SS.log while leaving the console output
-// untouched. Best-effort: when the log cannot be created the run proceeds
-// unlogged. The log carries plain text (color codes stripped, \r progress
-// redraws folded to newlines) so it reads well in the panel file manager.
-// Retention is capped at maxRetainedRunLogs (N=50).
-func startRunLog(workDir string, now time.Time) {
-	if err := os.MkdirAll(filepath.Join(workDir, runLogDir), 0755); err != nil {
-		return
-	}
-	name := uniqueRunLogName(workDir, now)
-	f, err := os.OpenFile(filepath.Join(workDir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
-	if err != nil {
-		return
-	}
-	runLogFile = f
-	os.Stdout = teeToLog(os.Stdout, f)
-	os.Stderr = teeToLog(os.Stderr, f)
-	pruneOldFiles(filepath.Join(workDir, runLogDir), "tidy-", ".log", maxRetainedRunLogs)
-}
-
-// pruneOldFiles keeps only the newest keep files matching prefix+*+ext in
-// dir, sorted by name (datetime names sort chronologically). Best-effort.
-func pruneOldFiles(dir, prefix, ext string, keep int) {
-	entries, err := os.ReadDir(dir)
-	if err != nil || keep <= 0 {
-		return
-	}
-	var names []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		n := e.Name()
-		if strings.HasPrefix(n, prefix) && strings.HasSuffix(n, ext) {
-			names = append(names, n)
-		}
-	}
-	if len(names) <= keep {
-		return
-	}
-	sort.Strings(names)
-	for _, n := range names[:len(names)-keep] {
-		_ = os.Remove(filepath.Join(dir, n))
-	}
-}
-
-// teeToLog swaps dst for a pipe writer and streams everything written to it
-// to both dst and the run log. ANSI stripping buffers a trailing partial
-// escape (e.g. "\x1b[" split across 32KiB reads) so split sequences never
-// leak raw bytes into the log.
-func teeToLog(dst *os.File, log *os.File) *os.File {
-	r, w, err := os.Pipe()
-	if err != nil {
-		return dst
-	}
-	runLogPipes = append(runLogPipes, w)
-	runLogWait.Add(1)
-	go func() {
-		defer runLogWait.Done()
-		defer r.Close()
-		buf := make([]byte, 32*1024)
-		var pending []byte
-		for {
-			n, rerr := r.Read(buf)
-			if n > 0 {
-				chunk := buf[:n]
-				_, _ = dst.Write(chunk)
-				combined := chunk
-				if len(pending) > 0 {
-					combined = append(append([]byte(nil), pending...), chunk...)
-					pending = nil
-				}
-				// Hold a trailing partial SGR prefix for the next chunk.
-				if idx := bytes.LastIndexByte(combined, 0x1b); idx >= 0 {
-					tail := combined[idx:]
-					if isPartialSGR(tail) {
-						pending = append([]byte(nil), tail...)
-						combined = combined[:idx]
-					}
-				}
-				plain := ansiSGR.ReplaceAll(combined, nil)
-				plain = bytes.ReplaceAll(plain, []byte("\r"), []byte("\n"))
-				_, _ = log.Write(plain)
-			}
-			if rerr != nil {
-				// Flush any held partial sequence as plain text.
-				if len(pending) > 0 {
-					plain := ansiSGR.ReplaceAll(pending, nil)
-					_, _ = log.Write(plain)
-					pending = nil
-				}
-				return
-			}
-		}
-	}()
-	return w
-}
-
-// isPartialSGR reports whether tail looks like a truncated SGR escape:
-// "\x1b" or "\x1b[" followed only by digits/semicolons with no final byte.
-func isPartialSGR(tail []byte) bool {
-	if len(tail) == 0 || tail[0] != 0x1b {
-		return false
-	}
-	if len(tail) == 1 {
-		return true
-	}
-	if tail[1] != '[' {
-		return false
-	}
-	for _, c := range tail[2:] {
-		if (c >= '0' && c <= '9') || c == ';' {
-			continue
-		}
-		// A final letter completes the sequence: not partial.
-		return false
-	}
-	return true
-}
-
-// finishRunLog drains the tee goroutines and closes the run log. It must
-// run before every process exit or the log tail is lost (deferred calls do
-// not run on os.Exit).
-func finishRunLog() {
-	for _, p := range runLogPipes {
-		_ = p.Close()
-	}
-	runLogPipes = nil
-	runLogWait.Wait()
-	if runLogFile != nil {
-		_ = runLogFile.Close()
-		runLogFile = nil
-	}
-}
-
-// exitWithLog flushes the run log, then exits.
-func exitWithLog(code int) {
-	finishRunLog()
-	os.Exit(code)
-}
-
-// isCharDevice reports whether f is a terminal (used to preserve live
-// progress bars: teeing through pipes would otherwise downgrade them to
-// piped milestone lines even on a real terminal).
-func isCharDevice(f *os.File) bool {
-	st, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return st.Mode()&os.ModeCharDevice != 0
-}
-
-// setupWorkdir pre-scans setup args for --workdir/--root (both dash forms,
-// with space or =) so setup runs log under the same workdir setup itself
-// will use. Defaults to "." like setup.Run.
-func setupWorkdir(args []string) string {
-	dir := "."
-	for i := 0; i < len(args); i++ {
-		name, value, hasValue := strings.Cut(args[i], "=")
-		name = strings.TrimLeft(name, "-")
-		if name != "workdir" && name != "root" {
-			continue
-		}
-		if hasValue {
-			if strings.TrimSpace(value) != "" {
-				dir = value
-			}
-			continue
-		}
-		if i+1 < len(args) {
-			dir = args[i+1]
-			i++
-		}
-	}
-	return dir
 }
 
 func main() {
