@@ -825,7 +825,6 @@ func main() {
 		workDirFlag    = flag.String("workdir", ".", "Working directory for Minecraft server root")
 		gitRepoFlag    = flag.String("git-repo", "", "Git repository URL to synchronize declarative configs (or env GIT_REPO)")
 		gitBranchFlag  = flag.String("git-branch", "", "Git branch to synchronize (or env GIT_BRANCH, default 'main')")
-		gitTokenFlag   = flag.String("git-token", "", "Git authentication token (or env GIT_TOKEN / GITHUB_TOKEN)")
 		gitUserFlag    = flag.String("git-user", "", "Git username (or env GIT_USER)")
 		skipGitFlag    = flag.Bool("skip-git", false, "Skip Git synchronization")
 		skipTplFlag    = flag.Bool("skip-templates", false, "Skip Mustache template variable replacement")
@@ -898,13 +897,11 @@ func main() {
 		}
 	}
 
-	gitToken := *gitTokenFlag
-	if gitToken == "" {
-		for _, envKey := range []string{"GIT_TOKEN", "GIT_AUTH_TOKEN", "GITHUB_TOKEN"} {
-			if val := os.Getenv(envKey); strings.TrimSpace(val) != "" {
-				gitToken = strings.TrimSpace(val)
-				break
-			}
+	var gitToken string
+	for _, envKey := range []string{"GIT_TOKEN", "GIT_AUTH_TOKEN", "GITHUB_TOKEN"} {
+		if val := os.Getenv(envKey); strings.TrimSpace(val) != "" {
+			gitToken = strings.TrimSpace(val)
+			break
 		}
 	}
 
@@ -1094,7 +1091,7 @@ func main() {
 	installedPlugins := make(map[string]state.PluginState)
 	modClient := resolver.NewModrinthClient("", "", nil)
 	// GitHub release downloads reuse the same PAT as git sync
-	// (flag --git-token or env GIT_TOKEN / GIT_AUTH_TOKEN / GITHUB_TOKEN).
+	// GitHub downloads reuse the git PAT from env.
 	ghClient := resolver.NewGitHubClient("", gitToken, nil)
 
 	// A. Detect removed plugins (present in previous state but removed from tidy.toml)

@@ -26,7 +26,7 @@ const DefaultGitHubBaseURL = "https://api.github.com"
 var DefaultGitHubUserAgent = "Kenzi-Siaufandi/tidy/" + version.Version + " (https://github.com/Kenzi-Siaufandi/tidy)"
 
 // githubTokenEnvKeys mirrors the git auth aliases in main.go, so private
-// release downloads reuse the same PAT (flag --git-token or env). The token
+// release downloads reuse the same PAT from env. The token
 // never belongs in tidy.toml.
 var githubTokenEnvKeys = []string{"GIT_TOKEN", "GIT_AUTH_TOKEN", "GITHUB_TOKEN"}
 
@@ -184,9 +184,9 @@ func (c *GitHubClient) fetchRelease(ctx context.Context, endpoint string) (*GitH
 		if usedAuth {
 			return nil, false, fmt.Errorf("GitHub API returned 404 for %s (release/tag not found, or the repo is private and the token lacks access)", endpoint)
 		}
-		return nil, false, fmt.Errorf("GitHub API returned 404 for %s (release/tag not found, or the repo is private and no token with access was provided via --git-token / GIT_TOKEN / GIT_AUTH_TOKEN / GITHUB_TOKEN)", endpoint)
+		return nil, false, fmt.Errorf("GitHub API returned 404 for %s (release/tag not found, or the repo is private and no token with access was provided via GIT_TOKEN / GIT_AUTH_TOKEN / GITHUB_TOKEN)", endpoint)
 	case http.StatusUnauthorized:
-		return nil, false, fmt.Errorf("GitHub API authentication failed (401): check the PAT in --git-token / GIT_TOKEN / GIT_AUTH_TOKEN / GITHUB_TOKEN")
+		return nil, false, fmt.Errorf("GitHub API authentication failed (401): check the PAT in GIT_TOKEN / GIT_AUTH_TOKEN / GITHUB_TOKEN")
 	case http.StatusForbidden:
 		return nil, false, fmt.Errorf("GitHub API access forbidden (403): token lacks access or the rate limit was exceeded")
 	default:

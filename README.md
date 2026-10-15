@@ -147,7 +147,7 @@ source = "url"
 url = "https://github.com/MilkBowl/Vault/releases/download/1.7.3/Vault.jar"
 sha256 = "a6b5ed97f43a5cf5bbaf00a7c8cd23c5afc9bd003f849875af8b36e6cf77d01d"
 
-# GitHub release asset, incl. private repos (auth via --git-token or env
+# GitHub release asset, incl. private repos (auth via env
 # GIT_TOKEN / GIT_AUTH_TOKEN / GITHUB_TOKEN — never put the token in tidy.toml):
 # [plugins.MyPrivatePlugin]
 # source = "github"
