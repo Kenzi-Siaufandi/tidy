@@ -365,6 +365,23 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate [templates] custom paths: must be relative and stay inside
+	// the workdir. Absolute paths and parent traversals are rejected.
+	for _, p := range c.Templates.Paths {
+		trimmed := strings.TrimSpace(p)
+		if trimmed == "" {
+			continue
+		}
+		if filepath.IsAbs(trimmed) {
+			return fmt.Errorf("templates paths %q must be relative and stay inside workdir", p)
+		}
+		for _, part := range strings.Split(filepath.ToSlash(trimmed), "/") {
+			if part == ".." {
+				return fmt.Errorf("templates paths %q must be relative and stay inside workdir", p)
+			}
+		}
+	}
+
 	// Default template paths if none configured. Must stay in sync with
 	// templating.IsSupportedConfigFile (.yml/.yaml/.properties/.json/.conf/
 	// .toml/.txt/.cfg/.env).

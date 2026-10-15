@@ -1,6 +1,7 @@
 package templating
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -10,6 +11,10 @@ import (
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/ui"
 )
+
+// MaxTemplateFileBytes caps single template file reads (2 MiB) to avoid
+// unbounded memory use on huge or binary-adjacent configs.
+const MaxTemplateFileBytes = 2 * 1024 * 1024
 
 // MustacheVariableRegex matches {{VAR_NAME}} or {{ VAR_NAME }}.
 var MustacheVariableRegex = regexp.MustCompile(`\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}`)
@@ -66,9 +71,15 @@ func ProcessFile(path string) (int, []string, error) {
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to stat file %q: %w", path, err)
 	}
+	if info.Size() > MaxTemplateFileBytes {
+		return 0, nil, nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to read file %q: %w", path, err)
+	}
+	if !bytes.Contains(data, []byte("{{")) {
+		return 0, nil, nil
 	}
 
 	newContent, count, missing := ReplaceString(string(data))
@@ -199,6 +210,35 @@ func processOneFile(rootDir, absPath string, result *ReplaceResult) error {
 	if err != nil {
 		return nil
 	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return nil
+	}
+	// Symlink-aware containment: resolve the real root and target and
+	// ensure the target stays inside. Skip when outside or unresolvable
+	// in a way that prevents verification.
+	if realRoot, err := filepath.EvalSymlinks(rootDir); err == nil {
+		realTarget := absPath
+		if rt, rerr := filepath.EvalSymlinks(absPath); rerr == nil {
+			realTarget = rt
+		} else if dir := filepath.Dir(absPath); dir != absPath {
+			if rd, derr := filepath.EvalSymlinks(dir); derr == nil {
+				// Best-effort: re-anchor the lexical remainder onto the
+				// resolved parent when the target itself is missing.
+				if rem, jerr := filepath.Rel(dir, absPath); jerr == nil && rem != ".." && !strings.HasPrefix(rem, ".."+string(os.PathSeparator)) {
+					realTarget = filepath.Join(rd, rem)
+				} else {
+					return nil
+				}
+			} else {
+				return nil
+			}
+		} else {
+			return nil
+		}
+		if rrel, rerr := filepath.Rel(realRoot, realTarget); rerr != nil || rrel == ".." || strings.HasPrefix(rrel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rrel) {
+			return nil
+		}
+	}
 	// Never touch .git/.tidy internals even if a custom glob matches them.
 	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
 		if part == ".git" || part == ".tidy" {
@@ -244,37 +284,63 @@ func processOneFile(rootDir, absPath string, result *ReplaceResult) error {
 }
 
 func processOneFileByAbs(rootDir, absPath string, result *ReplaceResult) error {
-	relPath, _ := filepath.Rel(rootDir, absPath)
-	count, missing, procErr := ProcessFile(absPath)
-	if procErr != nil {
-		return procErr
-	}
+	// Lexical containment: never process paths escaping the root.
+	if rel, err := filepath.Rel(rootDir, absPath); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return nil
+	} else {
+		relPath := rel
+		// Symlink-aware containment for direct file targets (WalkDir in
+		// walkAll/processOneFile may hand us a symlink pointing outside).
+		if realRoot, err := filepath.EvalSymlinks(rootDir); err == nil {
+			realTarget := absPath
+			if rt, rerr := filepath.EvalSymlinks(absPath); rerr == nil {
+				realTarget = rt
+			} else if dir := filepath.Dir(absPath); dir != absPath {
+				if rd, derr := filepath.EvalSymlinks(dir); derr == nil {
+					if rem, jerr := filepath.Rel(dir, absPath); jerr == nil && rem != ".." && !strings.HasPrefix(rem, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rem) {
+						realTarget = filepath.Join(rd, rem)
+					} else {
+						return nil
+					}
+				} else {
+					return nil
+				}
+			} else {
+				return nil
+			}
+			if rrel, rerr := filepath.Rel(realRoot, realTarget); rerr != nil || rrel == ".." || strings.HasPrefix(rrel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rrel) {
+				return nil
+			}
+		}
+		count, missing, procErr := ProcessFile(absPath)
+		if procErr != nil {
+			return procErr
+		}
 
-	result.FilesProcessed++
-	if count > 0 {
-		result.Replacements += count
-		result.ModifiedFiles = append(result.ModifiedFiles, relPath)
-	}
+		result.FilesProcessed++
+		if count > 0 {
+			result.Replacements += count
+			result.ModifiedFiles = append(result.ModifiedFiles, relPath)
+		}
 
-	for _, mv := range missing {
-		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf(" [!] Config warning: environment variable {{%s}} in %s is not set", mv, relPath)))
+		for _, mv := range missing {
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf(" [!] Config warning: environment variable {{%s}} in %s is not set", mv, relPath)))
+		}
+		return nil
 	}
-	return nil
 }
 
-// expandPattern resolves a single glob (absolute or relative to rootDir)
-// with ** support into absolute file paths.
+// expandPattern resolves a single glob (relative to rootDir)
+// with ** support into absolute file paths. Absolute patterns and
+// parent traversals are rejected outright.
 func expandPattern(rootDir, pattern string) ([]string, error) {
-	// Absolute pattern: use directly.
 	if filepath.IsAbs(pattern) {
-		if strings.Contains(pattern, "**") {
-			return matchDoublestarAbs(pattern)
+		return nil, fmt.Errorf("invalid template pattern %q: absolute paths not allowed", pattern)
+	}
+	for _, part := range strings.Split(filepath.ToSlash(pattern), "/") {
+		if part == ".." {
+			return nil, fmt.Errorf("invalid template pattern %q: parent traversals (..) not allowed", pattern)
 		}
-		matches, err := filepath.Glob(pattern)
-		if err != nil {
-			return nil, fmt.Errorf("invalid template pattern %q: %w", pattern, err)
-		}
-		return matches, nil
 	}
 	// Relative pattern: try Glob against joined path first (covers *, ?).
 	joined := filepath.Join(rootDir, pattern)
@@ -313,42 +379,10 @@ func expandPattern(rootDir, pattern string) ([]string, error) {
 	return out, nil
 }
 
-// matchDoublestarAbs handles absolute patterns containing **.
+// matchDoublestarAbs is retained for compatibility but absolute patterns
+// are rejected outright by expandPattern/Validate; never walk outside root.
 func matchDoublestarAbs(pattern string) ([]string, error) {
-	// Walk from the longest static prefix to limit I/O.
-	prefix := pattern
-	if i := strings.Index(pattern, "**"); i >= 0 {
-		prefix = pattern[:i]
-		if j := strings.LastIndex(prefix, string(os.PathSeparator)); j >= 0 {
-			prefix = prefix[:j]
-		} else {
-			prefix = string(os.PathSeparator)
-		}
-	}
-	if prefix == "" {
-		prefix = string(os.PathSeparator)
-	}
-	re, err := globToRegex(pattern)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	_ = filepath.WalkDir(prefix, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if d.Name() == ".git" || d.Name() == ".tidy" || d.Name() == "cache" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if re.MatchString(filepath.ToSlash(p)) || re.MatchString(p) {
-			out = append(out, p)
-		}
-		return nil
-	})
-	return out, nil
+	return nil, fmt.Errorf("invalid template pattern %q: absolute paths not allowed", pattern)
 }
 
 // globToRegex converts a glob with *, ?, ** into a regex.

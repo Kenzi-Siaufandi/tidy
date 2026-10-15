@@ -70,6 +70,11 @@ func extractZip(zipPath, destDir string) (int, error) {
 			return count, fmt.Errorf("archive exceeds file limit of %d", MaxArchiveFiles)
 		}
 		entries++
+		// Skip symlink entries outright (mirror tar behavior): never
+		// materialize attacker-controlled links.
+		if f.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
 		targetPath := filepath.Join(cleanDest, f.Name)
 		// ZipSlip protection
 		if !strings.HasPrefix(filepath.Clean(targetPath), cleanDest+string(os.PathSeparator)) && filepath.Clean(targetPath) != cleanDest {
@@ -78,6 +83,9 @@ func extractZip(zipPath, destDir string) (int, error) {
 
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(targetPath, 0755); err != nil {
+				return count, err
+			}
+			if err := ensureParentInside(cleanDest, targetPath, f.Name); err != nil {
 				return count, err
 			}
 			// Directory entries count toward the limit via entries
@@ -90,6 +98,9 @@ func extractZip(zipPath, destDir string) (int, error) {
 		}
 
 		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+			return count, err
+		}
+		if err := ensureParentInside(cleanDest, filepath.Dir(targetPath), f.Name); err != nil {
 			return count, err
 		}
 
@@ -184,6 +195,9 @@ func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 			if err := os.MkdirAll(targetPath, 0755); err != nil {
 				return count, err
 			}
+			if err := ensureParentInside(cleanDest, targetPath, header.Name); err != nil {
+				return count, err
+			}
 			// Directory entries count toward entries (inode exhaustion)
 			// but not toward the returned file count.
 		case tar.TypeReg:
@@ -194,6 +208,9 @@ func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 				return count, fmt.Errorf("archive entry %q exceeds size limit", header.Name)
 			}
 			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+				return count, err
+			}
+			if err := ensureParentInside(cleanDest, filepath.Dir(targetPath), header.Name); err != nil {
 				return count, err
 			}
 
@@ -228,6 +245,29 @@ func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 	}
 
 	return count, nil
+}
+
+// ensureParentInside verifies that an already-created extraction directory
+// still resolves inside the destination after symlink evaluation. This
+// catches parent-directory symlink attacks where MkdirAll traverses a
+// pre-existing symlink pointing outside destDir.
+func ensureParentInside(cleanDest, dirPath, entryName string) error {
+	realDest, err := filepath.EvalSymlinks(cleanDest)
+	if err != nil {
+		realDest = cleanDest
+	}
+	realDir, err := filepath.EvalSymlinks(dirPath)
+	if err != nil {
+		return fmt.Errorf("illegal file path in archive: %q (cannot resolve %q: %v)", entryName, dirPath, err)
+	}
+	rel, err := filepath.Rel(realDest, realDir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		// Allow the destination root itself.
+		if rel != "." {
+			return fmt.Errorf("illegal file path in archive: %q escapes destination via symlink", entryName)
+		}
+	}
+	return nil
 }
 
 // sanitizeFileMode strips setuid/setgid/sticky bits and limits to owner/group/other

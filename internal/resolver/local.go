@@ -42,6 +42,39 @@ func ResolveLocalPath(pCfg config.PluginConfig, workDir string) (string, string,
 		return "", "", fmt.Errorf("local source 'path' %q must stay inside the workdir", pCfg.Path)
 	}
 
+	// Symlink-aware containment: resolve the nearest existing ancestor and
+	// ensure it (plus the lexical remainder) stays inside the real workdir.
+	realWork := workAbs
+	if rw, err := filepath.EvalSymlinks(workAbs); err == nil {
+		realWork = rw
+	}
+	existing := abs
+	for {
+		if _, lerr := os.Lstat(existing); lerr == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			break
+		}
+		existing = parent
+	}
+	if _, lerr := os.Lstat(existing); lerr == nil {
+		if realExisting, err := filepath.EvalSymlinks(existing); err == nil {
+			if rrel, rerr := filepath.Rel(realWork, realExisting); rerr != nil || rrel == ".." || strings.HasPrefix(rrel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rrel) {
+				if rrel != "." {
+					return "", "", fmt.Errorf("local source 'path' %q must stay inside the workdir", pCfg.Path)
+				}
+			}
+			if rem, rerr := filepath.Rel(existing, abs); rerr == nil && rem != "." {
+				realAbs := filepath.Join(realExisting, rem)
+				if rrel2, rerr := filepath.Rel(realWork, realAbs); rerr != nil || rrel2 == ".." || strings.HasPrefix(rrel2, ".."+string(os.PathSeparator)) || filepath.IsAbs(rrel2) {
+					return "", "", fmt.Errorf("local source 'path' %q must stay inside the workdir", pCfg.Path)
+				}
+			}
+		}
+	}
+
 	filename, err := SafeFilename(filepath.Base(abs), "")
 	if err != nil {
 		return "", "", fmt.Errorf("invalid local plugin filename: %w", err)
