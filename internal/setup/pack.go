@@ -4,8 +4,6 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Kenzi-Siaufandi/tidy/internal/state"
 	"github.com/Kenzi-Siaufandi/tidy/internal/ui"
 )
 
@@ -327,20 +326,6 @@ func writeZip(staging, dest string, rels []string) error {
 	return nil
 }
 
-func sha256File(path string) (string, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", 0, err
-	}
-	defer f.Close()
-	h := sha256.New()
-	n, err := io.Copy(h, f)
-	if err != nil {
-		return "", 0, err
-	}
-	return hex.EncodeToString(h.Sum(nil)), n, nil
-}
-
 // PackWorld copies a world, strips player data, and archives the result.
 // The live world directory is never modified.
 func PackWorld(opts PackOptions) (*PackResult, error) {
@@ -403,9 +388,13 @@ func PackWorld(opts PackOptions) (*PackResult, error) {
 		return nil, fmt.Errorf("failed to write archive: %w", err)
 	}
 
-	sum, size, err := sha256File(absOut)
+	sum, err := state.ComputeFileSHA256(absOut)
 	if err != nil {
 		return nil, err
+	}
+	var size int64
+	if info, statErr := os.Stat(absOut); statErr == nil {
+		size = info.Size()
 	}
 	return &PackResult{
 		ArchivePath:   absOut,
@@ -449,7 +438,7 @@ func CmdPackWorld(root string, opts PackOptions) int {
 		world = "world"
 	}
 	fmt.Printf("\n%s (upload the archive, then paste):\n", ui.Bold("tidy.toml snippet"))
-	fmt.Printf("[worlds.%s_template]\n", world)
+	fmt.Printf("[worlds.%s]\n", TomlKey(world+"_template"))
 	fmt.Printf("source = \"http\"\npath = %q\nurl = \"https://.../%s\"\nsha256 = %q\nextract = true\nonce = true\n",
 		world, filepath.Base(res.ArchivePath), res.SHA256)
 	return 0

@@ -44,11 +44,39 @@ type WizardSpec struct {
 }
 
 func tomlString(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\t", `\t`)
-	return `"` + r.Replace(s) + `"`
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\f':
+			b.WriteString(`\f`)
+		default:
+			if r < 0x20 || r == 0x7F {
+				fmt.Fprintf(&b, `\u%04X`, r)
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
-func tomlKey(s string) string {
+// TomlKey renders a TOML table key: bare when it matches
+// [A-Za-z0-9_-]+, otherwise a quoted basic string.
+func TomlKey(s string) string {
 	if s == "" {
 		return tomlString(s)
 	}
@@ -58,6 +86,10 @@ func tomlKey(s string) string {
 		}
 	}
 	return s
+}
+
+func tomlKey(s string) string {
+	return TomlKey(s)
 }
 
 // BuildTOML renders a WizardSpec as tidy.toml content.

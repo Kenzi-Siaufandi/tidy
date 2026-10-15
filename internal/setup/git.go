@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -47,16 +48,42 @@ func GitStatusMap(root string) map[string]string {
 		return m
 	}
 	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
 		if len(line) < 4 {
 			continue
 		}
 		st := strings.TrimSpace(line[:2])
-		p := strings.TrimSpace(line[3:])
-		if p != "" {
+		rest := strings.TrimSpace(line[3:])
+		if rest == "" {
+			continue
+		}
+		// Rename/copy entries ("old -> new") resolve to the new path.
+		// Only split when the status indicates a rename/copy so filenames
+		// containing " -> " are not mangled.
+		if strings.Contains(st, "R") || strings.Contains(st, "C") {
+			if idx := strings.Index(rest, " -> "); idx >= 0 {
+				rest = rest[idx+4:]
+			}
+		}
+		if p := cleanPorcelainPath(rest); p != "" {
 			m[p] = st
 		}
 	}
 	return m
+}
+
+// cleanPorcelainPath normalizes a porcelain path: unquotes C-quoted names
+// and forces slash separators.
+func cleanPorcelainPath(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if len(raw) >= 2 && strings.HasPrefix(raw, "\"") && strings.HasSuffix(raw, "\"") {
+		if unquoted, err := strconv.Unquote(raw); err == nil {
+			raw = unquoted
+		} else {
+			raw = strings.Trim(raw, "\"")
+		}
+	}
+	return filepath.ToSlash(raw)
 }
 
 // LsFiles lists tracked files, optionally with extra git ls-files args.

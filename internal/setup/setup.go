@@ -45,10 +45,34 @@ func Run(args []string) int {
 	)
 
 	// Extract subcommand first so flags may appear before or after it.
+	// Value flags (--workdir, --root, --world, --output, --format, in both
+	// --flag value and --flag=value forms, single or double dash) consume
+	// the next token so values like "status" are not mistaken for a subcommand.
+	stringFlags := map[string]bool{
+		"workdir": true,
+		"root":    true,
+		"world":   true,
+		"output":  true,
+		"format":  true,
+	}
 	sub := ""
 	var flags []string
-	for _, a := range args {
-		if sub == "" && !strings.HasPrefix(a, "-") && (a == "init" || a == "status" || a == "check" || a == "pack-world" || a == "new") {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-") && len(a) > 1 {
+			flags = append(flags, a)
+			name := strings.TrimLeft(a, "-")
+			if eq := strings.Index(name, "="); eq >= 0 {
+				name = name[:eq]
+			} else if stringFlags[name] {
+				if i+1 < len(args) {
+					i++
+					flags = append(flags, args[i])
+				}
+			}
+			continue
+		}
+		if sub == "" && (a == "init" || a == "status" || a == "check" || a == "pack-world" || a == "new") {
 			sub = a
 			continue
 		}
@@ -96,18 +120,21 @@ func Run(args []string) int {
 
 	switch sub {
 	case "", "status":
-		if force && sub == "" {
-			fmt.Fprintf(os.Stderr, "%s\n", ui.Yellow("[!] --force only applies to init; ignoring."))
+		if force {
+			fmt.Fprintf(os.Stderr, "%s\n", ui.Yellow("[!] --force only applies to init and new; ignoring."))
 		}
 		return CmdStatus(serverRoot)
 	case "init":
 		return CmdInit(serverRoot, force)
 	case "check":
 		if force {
-			fmt.Fprintf(os.Stderr, "%s\n", ui.Yellow("[!] --force only applies to init; ignoring."))
+			fmt.Fprintf(os.Stderr, "%s\n", ui.Yellow("[!] --force only applies to init and new; ignoring."))
 		}
 		return CmdCheck(serverRoot)
 	case "pack-world":
+		if force {
+			fmt.Fprintf(os.Stderr, "%s\n", ui.Yellow("[!] --force only applies to init and new; ignoring."))
+		}
 		return CmdPackWorld(serverRoot, PackOptions{World: world, Output: output, Format: format})
 	case "new":
 		return CmdNew(serverRoot, output, force, os.Stdin, os.Stdout)

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Kenzi-Siaufandi/tidy/internal/progress"
 )
 
 // MaxConfigSizeBytes caps tracked config size (2 MB) to avoid tracking binaries.
@@ -282,45 +284,7 @@ func containsWorld(parts []string) bool {
 }
 
 // FormatSize renders bytes as a human readable string.
+// Delegates to progress.FormatBytes for consistent output.
 func FormatSize(sizeBytes int64) string {
-	switch {
-	case sizeBytes < 1024:
-		return itoa(sizeBytes) + " B"
-	case sizeBytes < 1024*1024:
-		return oneDecimal(float64(sizeBytes)/1024) + " KB"
-	default:
-		return oneDecimal(float64(sizeBytes)/(1024*1024)) + " MB"
-	}
-}
-
-func itoa(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [32]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
-}
-
-func oneDecimal(f float64) string {
-	rounded := float64(int(f*10+0.5)) / 10
-	whole := int(rounded)
-	frac := int(rounded*10) - whole*10
-	if frac < 0 {
-		frac = -frac
-	}
-	return itoa(int64(whole)) + "." + itoa(int64(frac))
+	return progress.FormatBytes(sizeBytes)
 }

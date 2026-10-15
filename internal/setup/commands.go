@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/ui"
 )
@@ -84,7 +86,7 @@ func CmdStatus(root string) int {
 	} else {
 		fmt.Printf("Git Initialized : %s\n", ui.Yellow("No (run tidy setup init)"))
 	}
-	fmt.Printf("Total Configs   : %s (%s)\n\n", ui.Green(itoa(int64(totalConfigs))), FormatSize(totalSize))
+	fmt.Printf("Total Configs   : %s (%s)\n\n", ui.Green(strconv.Itoa(totalConfigs)), FormatSize(totalSize))
 
 	printEntry := func(abs string) {
 		rel, err := filepath.Rel(root, abs)
@@ -98,11 +100,11 @@ func CmdStatus(root string) int {
 		symbol, colorize := " ", ui.Gray
 		if code, ok := gitMap[filepath.ToSlash(rel)]; ok {
 			switch {
-			case contains(code, "?"):
+			case strings.Contains(code, "?"):
 				symbol, colorize = "?", ui.Yellow
-			case contains(code, "A"):
+			case strings.Contains(code, "A"):
 				symbol, colorize = "+", ui.Green
-			case contains(code, "M"):
+			case strings.Contains(code, "M"):
 				symbol, colorize = "M", ui.Cyan
 			default:
 				symbol, colorize = code, ui.Yellow
@@ -183,13 +185,13 @@ func CmdCheck(root string) int {
 		fmt.Printf("  %s\n", ui.Red("[x] Missing .gitignore! Worlds and binaries may be accidentally tracked."))
 		issues++
 	} else {
-		if !contains(string(content), "world") {
+		if !strings.Contains(string(content), "world") {
 			fmt.Printf("  %s\n", ui.Yellow("[!] .gitignore does not explicitly mention 'world/'."))
 			issues++
 		} else {
 			fmt.Printf("  %s\n", ui.Green("[+] .gitignore excludes world directories."))
 		}
-		if !contains(string(content), "*.jar") {
+		if !strings.Contains(string(content), "*.jar") {
 			fmt.Printf("  %s\n", ui.Yellow("[!] .gitignore does not explicitly exclude '*.jar'."))
 			issues++
 		} else {
@@ -223,24 +225,9 @@ func CmdCheck(root string) int {
 	return 1
 }
 
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(sub) == 0 || indexOf(s, sub) >= 0)
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
-}
-
 func firstLine(s string) string {
-	for i, c := range s {
-		if c == '\n' {
-			return s[:i]
-		}
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
 	}
 	return s
 }
