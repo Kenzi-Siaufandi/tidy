@@ -3,7 +3,7 @@
 > [!WARNING]
 > **Notice**: This is a **vibe coded** project and is only meant to be used for convenience. Use at your own discretion.
 
-A tiny, lightweight, zero-dependency Go CLI that acts as a **pre-flight container orchestrator** for Minecraft servers.
+A tiny, lightweight Go CLI (single TOML dependency) that acts as a **pre-flight container orchestrator** for Minecraft servers.
 
 Tidy reads your `tidy.toml`, downloads the server jar, plugins, worlds, and other files you declared, fills in config values from environment variables, and gets everything ready before the server starts.
 
