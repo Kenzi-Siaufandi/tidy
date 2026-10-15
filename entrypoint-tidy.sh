@@ -9,7 +9,10 @@
 # Stock Yolks /entrypoint.sh ends with `exec env ${PARSED}` (unquoted expansion,
 # no eval), so shell operators (`&&`, `;`, `$()`, quotes) from STARTUP are passed
 # literally to `env` instead of being interpreted. Chained startups get mangled
-# (PARSED truncates to just `tidy`). The final `eval` below preserves them.
+# (PARSED truncates to just `tidy`). `run_startup_safely` below preserves `&&`,
+# `||`, `;` chaining plus quotes WITHOUT eval: only simple `${NAME}`/`$NAME`
+# references expand to literal values; `$()`, backticks, `|`, `>`, `&`, globs
+# stay literal arguments, so FLAG/SERVER_JAR values cannot inject commands.
 
 # Default the TZ environment variable to UTC.
 TZ=${TZ:-UTC}
@@ -72,7 +75,7 @@ fi
 
 # 1. Pre-flight via tidy (unless STARTUP already invokes it, for backwards compat
 # with old `tidy && ...` eggs — running it twice is only wasted time otherwise).
-MODIFIED_STARTUP=$(echo -e "${STARTUP}" | sed -e 's/{{/${/g' -e 's/}}/}/g')
+MODIFIED_STARTUP=$(printf '%s' "${STARTUP}" | sed -e 's/{{/${/g' -e 's/}}/}/g')
 TRIMMED="$(echo "${MODIFIED_STARTUP}" | sed -e 's/^[[:space:]]*//')"
 case "${TRIMMED}" in
   tidy\ *|tidy\;*|tidy\&\&*|"$TIDY_BIN"*|TIDY_BIN*|\$TIDY_BIN*|\"\$TIDY_BIN\"*)
@@ -89,18 +92,443 @@ case "${TRIMMED}" in
     ;;
 esac
 
-# 2. Run the Egg startup. eval is required so `&&`, `;`, `$()`, `${VAR}` work.
-# Note: no leading `exec` on the eval itself — `exec env a && exec b` would
-# replace the shell at `a` and never reach `b`. Chained startups already carry
-# their own inner `exec java`, which is what must become PID 1.
+# 2. Run the Egg startup WITHOUT eval (P0: FLAG/SERVER_JAR are untrusted).
+# Only `&&`, `||`, `;` outside quotes chain segments; everything else (`$()`,
+# backticks, `|`, `>`, `<`, `&`, `*?[]`, `~`, `$(( ))`) stays a literal argument.
+# Note: no leading `exec` on a wrapper — `exec env a && exec b` would replace
+# the shell at `a` and never reach `b`. Chained startups already carry their
+# own inner `exec java`, which is what must become PID 1.
 printf "\033[1m\033[33mcontainer@pterodactyl~ \033[0m%s\n" "${MODIFIED_STARTUP}"
-case "${MODIFIED_STARTUP}" in
-  *exec[[:space:]]*)
-    # shellcheck disable=SC2086
-    eval "${MODIFIED_STARTUP}"
-    ;;
-  *)
-    # shellcheck disable=SC2086
-    eval "exec env ${MODIFIED_STARTUP}"
-    ;;
-esac
+set -f # disable pathname expansion: *?[] in values stay literal.
+
+__tidy_argv=()
+__tidy_last_rc=0
+__tidy_pending_op=";"
+
+__tidy_should_run_next() {
+  case "${__tidy_pending_op}" in
+    '&&') [ "${__tidy_last_rc}" -eq 0 ] ;;
+    '||') [ "${__tidy_last_rc}" -ne 0 ] ;;
+    *) return 0 ;;
+  esac
+}
+
+__tidy_run_segment_now() {
+  # Execute the current __tidy_argv as a child process (non-final segment).
+  local -a cmd=()
+  if [ "${#__tidy_argv[@]}" -eq 0 ]; then
+    return 0
+  fi
+  if [ "${__tidy_argv[0]}" = "exec" ]; then
+    if [ "${#__tidy_argv[@]}" -eq 1 ]; then
+      __tidy_argv=()
+      return 0
+    fi
+    cmd=("${__tidy_argv[@]:1}")
+  else
+    cmd=("${__tidy_argv[@]}")
+  fi
+  __tidy_argv=()
+  if __tidy_should_run_next; then
+    env "${cmd[@]}"
+    __tidy_last_rc=$?
+  fi
+}
+
+__tidy_exec_final_segment() {
+  # Exec the final segment (replaces PID 1). Never returns on success.
+  local -a cmd=()
+  if [ "${#__tidy_argv[@]}" -eq 0 ]; then
+    exit "${__tidy_last_rc}"
+  fi
+  if [ "${__tidy_argv[0]}" = "exec" ]; then
+    if [ "${#__tidy_argv[@]}" -eq 1 ]; then
+      exit "${__tidy_last_rc}"
+    fi
+    cmd=("${__tidy_argv[@]:1}")
+  else
+    cmd=("${__tidy_argv[@]}")
+  fi
+  if ! __tidy_should_run_next; then
+    exit "${__tidy_last_rc}"
+  fi
+  exec env "${cmd[@]}"
+  echo "[!] failed to exec startup command" >&2
+  exit 127
+}
+
+# Tokenize $1 into argv segments, expanding ONLY simple variable references
+# (`{{NAME}}`, `${NAME}`, `$NAME`) to literal env values. Values are inserted
+# literally during tokenization: only whitespace splits unquoted values (so
+# `FLAG="-Xmx2G -Dfoo=bar"` still works and empty FLAG vanishes); `;`, `&`,
+# `|`, quotes, `$`, backslashes inside values never gain syntactic meaning.
+run_startup_safely() {
+  local raw="${1:-}"
+  local token=""
+  local token_active=0
+  local in_single=0
+  local in_double=0
+  local i=0
+  local n=${#raw}
+  local ch nxt
+  local j k name val m mlen d c
+
+  __tidy_argv=()
+  __tidy_last_rc=0
+  __tidy_pending_op=";"
+
+  while [ "${i}" -lt "${n}" ]; do
+    ch="${raw:${i}:1}"
+
+    # Inside single quotes: everything literal until closing '.
+    if [ "${in_single}" -eq 1 ]; then
+      if [ "${ch}" = "'" ]; then
+        in_single=0
+      else
+        token="${token}${ch}"
+      fi
+      i=$((i + 1))
+      continue
+    fi
+
+    # Inside double quotes: expand vars (no splitting), backslash escapes next.
+    if [ "${in_double}" -eq 1 ]; then
+      if [ "${ch}" = '"' ]; then
+        in_double=0
+        i=$((i + 1))
+        continue
+      fi
+      if [ "${ch}" = "\\" ]; then
+        if [ $((i + 1)) -lt "${n}" ]; then
+          nxt="${raw:$((i + 1)):1}"
+          token="${token}${nxt}"
+          token_active=1
+          i=$((i + 2))
+        else
+          token="${token}${ch}"
+          token_active=1
+          i=$((i + 1))
+        fi
+        continue
+      fi
+      if [ "${ch}" = "{" ]; then
+        nxt="${raw:$((i + 1)):1}"
+        if [ "${nxt}" = "{" ]; then
+          j=$((i + 2))
+          k="${j}"
+          name=""
+          while [ "${k}" -lt "${n}" ]; do
+            c="${raw:${k}:1}"
+            case "${c}" in
+              [A-Za-z0-9_]) name="${name}${c}"; k=$((k + 1)) ;;
+              *) break ;;
+            esac
+          done
+          if [ -n "${name}" ]; then
+            case "${name}" in
+              [A-Za-z_]*)
+                if [ "${raw:${k}:2}" = "}}" ]; then
+                  val="${!name:-}"
+                  token="${token}${val}"
+                  token_active=1
+                  i=$((k + 2))
+                  continue
+                fi
+                ;;
+            esac
+          fi
+        fi
+        token="${token}${ch}"
+        token_active=1
+        i=$((i + 1))
+        continue
+      fi
+      if [ "${ch}" = "$" ]; then
+        nxt="${raw:$((i + 1)):1}"
+        if [ "${nxt}" = "{" ]; then
+          j=$((i + 2))
+          k="${j}"
+          name=""
+          while [ "${k}" -lt "${n}" ]; do
+            c="${raw:${k}:1}"
+            case "${c}" in
+              [A-Za-z0-9_]) name="${name}${c}"; k=$((k + 1)) ;;
+              *) break ;;
+            esac
+          done
+          if [ -n "${name}" ]; then
+            case "${name}" in
+              [A-Za-z_]*)
+                if [ "${raw:${k}:1}" = "}" ]; then
+                  val="${!name:-}"
+                  token="${token}${val}"
+                  token_active=1
+                  i=$((k + 1))
+                  continue
+                fi
+                ;;
+            esac
+          fi
+        else
+          case "${nxt}" in
+            [A-Za-z_])
+              j=$((i + 1))
+              k="${j}"
+              name=""
+              while [ "${k}" -lt "${n}" ]; do
+                c="${raw:${k}:1}"
+                case "${c}" in
+                  [A-Za-z0-9_]) name="${name}${c}"; k=$((k + 1)) ;;
+                  *) break ;;
+                esac
+              done
+              val="${!name:-}"
+              token="${token}${val}"
+              token_active=1
+              i="${k}"
+              continue
+              ;;
+          esac
+        fi
+        token="${token}\$"
+        token_active=1
+        i=$((i + 1))
+        continue
+      fi
+      token="${token}${ch}"
+      token_active=1
+      i=$((i + 1))
+      continue
+    fi
+
+    # Outside quotes.
+    if [ "${ch}" = "'" ]; then
+      in_single=1
+      token_active=1
+      i=$((i + 1))
+      continue
+    fi
+    if [ "${ch}" = '"' ]; then
+      in_double=1
+      token_active=1
+      i=$((i + 1))
+      continue
+    fi
+    if [ "${ch}" = "\\" ]; then
+      if [ $((i + 1)) -lt "${n}" ]; then
+        nxt="${raw:$((i + 1)):1}"
+        token="${token}${nxt}"
+        token_active=1
+        i=$((i + 2))
+      else
+        token="${token}${ch}"
+        token_active=1
+        i=$((i + 1))
+      fi
+      continue
+    fi
+    case "${ch}" in
+      ' '|$'\t'|$'\n'|$'\r')
+        if [ "${token_active}" -ne 0 ]; then
+          __tidy_argv+=("${token}")
+          token=""
+          token_active=0
+        fi
+        i=$((i + 1))
+        continue
+        ;;
+    esac
+    if [ "${ch}" = ";" ]; then
+      if [ "${token_active}" -ne 0 ]; then
+        __tidy_argv+=("${token}")
+        token=""
+        token_active=0
+      fi
+      __tidy_run_segment_now
+      __tidy_pending_op=";"
+      i=$((i + 1))
+      continue
+    fi
+    if [ "${ch}" = "&" ]; then
+      nxt="${raw:$((i + 1)):1}"
+      if [ "${nxt}" = "&" ]; then
+        if [ "${token_active}" -ne 0 ]; then
+          __tidy_argv+=("${token}")
+          token=""
+          token_active=0
+        fi
+        __tidy_run_segment_now
+        __tidy_pending_op="&&"
+        i=$((i + 2))
+        continue
+      fi
+      token="${token}${ch}"
+      token_active=1
+      i=$((i + 1))
+      continue
+    fi
+    if [ "${ch}" = "|" ]; then
+      nxt="${raw:$((i + 1)):1}"
+      if [ "${nxt}" = "|" ]; then
+        if [ "${token_active}" -ne 0 ]; then
+          __tidy_argv+=("${token}")
+          token=""
+          token_active=0
+        fi
+        __tidy_run_segment_now
+        __tidy_pending_op="||"
+        i=$((i + 2))
+        continue
+      fi
+      token="${token}${ch}"
+      token_active=1
+      i=$((i + 1))
+      continue
+    fi
+    if [ "${ch}" = "{" ]; then
+      nxt="${raw:$((i + 1)):1}"
+      if [ "${nxt}" = "{" ]; then
+        j=$((i + 2))
+        k="${j}"
+        name=""
+        while [ "${k}" -lt "${n}" ]; do
+          c="${raw:${k}:1}"
+          case "${c}" in
+            [A-Za-z0-9_]) name="${name}${c}"; k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done
+        if [ -n "${name}" ]; then
+          case "${name}" in
+            [A-Za-z_]*)
+              if [ "${raw:${k}:2}" = "}}" ]; then
+                val="${!name:-}"
+                m=0
+                mlen=${#val}
+                while [ "${m}" -lt "${mlen}" ]; do
+                  d="${val:${m}:1}"
+                  case "${d}" in
+                    ' '|$'\t'|$'\n'|$'\r')
+                      if [ "${token_active}" -ne 0 ]; then
+                        __tidy_argv+=("${token}")
+                        token=""
+                        token_active=0
+                      fi
+                      ;;
+                    *)
+                      token="${token}${d}"
+                      token_active=1
+                      ;;
+                  esac
+                  m=$((m + 1))
+                done
+                i=$((k + 2))
+                continue
+              fi
+              ;;
+          esac
+        fi
+      fi
+      token="${token}${ch}"
+      token_active=1
+      i=$((i + 1))
+      continue
+    fi
+    if [ "${ch}" = "$" ]; then
+      nxt="${raw:$((i + 1)):1}"
+      if [ "${nxt}" = "{" ]; then
+        j=$((i + 2))
+        k="${j}"
+        name=""
+        while [ "${k}" -lt "${n}" ]; do
+          c="${raw:${k}:1}"
+          case "${c}" in
+            [A-Za-z0-9_]) name="${name}${c}"; k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done
+        if [ -n "${name}" ]; then
+          case "${name}" in
+            [A-Za-z_]*)
+              if [ "${raw:${k}:1}" = "}" ]; then
+                val="${!name:-}"
+                m=0
+                mlen=${#val}
+                while [ "${m}" -lt "${mlen}" ]; do
+                  d="${val:${m}:1}"
+                  case "${d}" in
+                    ' '|$'\t'|$'\n'|$'\r')
+                      if [ "${token_active}" -ne 0 ]; then
+                        __tidy_argv+=("${token}")
+                        token=""
+                        token_active=0
+                      fi
+                      ;;
+                    *)
+                      token="${token}${d}"
+                      token_active=1
+                      ;;
+                  esac
+                  m=$((m + 1))
+                done
+                i=$((k + 1))
+                continue
+              fi
+              ;;
+          esac
+        fi
+      else
+        case "${nxt}" in
+          [A-Za-z_])
+            j=$((i + 1))
+            k="${j}"
+            name=""
+            while [ "${k}" -lt "${n}" ]; do
+              c="${raw:${k}:1}"
+              case "${c}" in
+                [A-Za-z0-9_]) name="${name}${c}"; k=$((k + 1)) ;;
+                *) break ;;
+              esac
+            done
+            val="${!name:-}"
+            m=0
+            mlen=${#val}
+            while [ "${m}" -lt "${mlen}" ]; do
+              d="${val:${m}:1}"
+              case "${d}" in
+                ' '|$'\t'|$'\n'|$'\r')
+                  if [ "${token_active}" -ne 0 ]; then
+                    __tidy_argv+=("${token}")
+                    token=""
+                    token_active=0
+                  fi
+                  ;;
+                *)
+                  token="${token}${d}"
+                  token_active=1
+                  ;;
+              esac
+              m=$((m + 1))
+            done
+            i="${k}"
+            continue
+            ;;
+        esac
+      fi
+      token="${token}\$"
+      token_active=1
+      i=$((i + 1))
+      continue
+    fi
+    token="${token}${ch}"
+    token_active=1
+    i=$((i + 1))
+  done
+
+  if [ "${token_active}" -ne 0 ]; then
+    __tidy_argv+=("${token}")
+  fi
+  __tidy_exec_final_segment
+}
+
+run_startup_safely "${MODIFIED_STARTUP}"
