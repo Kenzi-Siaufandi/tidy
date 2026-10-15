@@ -5,7 +5,7 @@ BINARY_NAME=tidy
 all: test build
 
 build:
-	CGO_ENABLED=0 go build -ldflags="-s -w" -o $(BINARY_NAME) main.go
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o $(BINARY_NAME) .
 
 test:
 	go test -v ./...

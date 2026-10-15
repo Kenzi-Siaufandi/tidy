@@ -42,7 +42,7 @@ jobs:
             ext=""
             if [ "$goos" = "windows" ]; then ext=".exe"; fi
             out="tidy-${{ github.ref_name }}-${goos}-${goarch}${ext}"
-            GOOS="$goos" GOARCH="$goarch" go build -ldflags="-s -w" -o "$out" main.go
+            GOOS="$goos" GOARCH="$goarch" go build -ldflags="-s -w" -o "$out" .
             sha256sum "$out" > "$out.sha256"
           done
 

@@ -1,12 +1,12 @@
 # AGENTS.md — Tidy
 
-Single static Go CLI (`main.go` only entrypoint). Flow: git sync → load `tidy.toml` → server → plugins → files/worlds → templates → save `.tidy/state.json`.
+Static Go CLI (`main` package: `main.go` + `main_drift.go` + `main_runlog.go`). Flow: git sync → load `tidy.toml` → server → plugins → files/worlds → templates → save `.tidy/state.json`.
 
 ## Commands
 
 - `make test` (`go test -v ./...`) — all unit tests, mocked HTTP, no services needed.
 - Focused: `go test ./internal/<pkg> -run TestName -v` (e.g. `internal/config`, `internal/resolver`).
-- `make build` → `CGO_ENABLED=0 go build -ldflags="-s -w" -o tidy main.go` (builds `main.go`, not `./...`).
+- `make build` → `CGO_ENABLED=0 go build -ldflags="-s -w" -o tidy .` (builds the `main` package, not a single file).
 - No lint / typecheck / codegen config.
 
 ## Layout
