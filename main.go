@@ -537,6 +537,9 @@ func main() {
 		// unchanged) to detect new releases; pins can skip via local SHA.
 		isLatest := (source == "modrinth" && pCfg.IsLatest()) ||
 			(source == "github" && pCfg.IsGitHubLatest())
+		if isLatest && strings.TrimSpace(pCfg.SHA256) == "" {
+			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Plugin [%s]: tracks latest upstream without a sha256 pin; new releases install on next boot", pluginName)))
+		}
 
 		// Check if plugin is already in state and unchanged
 		if previousState != nil {

@@ -11,8 +11,8 @@ version = "2.11.2" # exact version_number or version ID pin
 
 # Track the newest release supporting your Minecraft version ("latest" is the
 # default when 'version' is omitted). Errors out if no compatible release
-# exists. Optional 'sha256' pins the jar, but omit it with 'latest' so future
-# releases don't fail verification.
+# exists. Unpinned latest installs new upstream releases on every boot.
+# Optional 'sha256' pins the jar; omit it with 'latest' only if auto-update is intended.
 [plugins.LuckPerms]
 source = "modrinth"
 project_id = "luckperms"
