@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/config"
 )
@@ -40,12 +41,19 @@ func ResolveAndDownloadURL(ctx context.Context, pluginName string, pCfg config.P
 
 	targetPath := filepath.Join(workDir, "plugins", filename)
 
+	// Use a long-timeout client for the (large) jar download; a short API
+	// timeout would kill slow transfers.
+	downloadClient := client
+	if downloadClient == nil || downloadClient.Timeout < 5*time.Minute {
+		downloadClient = &http.Client{Timeout: 5 * time.Minute}
+	}
+
 	res, err := DownloadAndVerify(ctx, DownloadOptions{
 		URL:           pCfg.URL,
 		TargetPath:    targetPath,
 		ExpectedHash:  expectedSHA256,
 		HashAlgorithm: "sha256",
-		Client:        client,
+		Client:        downloadClient,
 		ProgressLabel: filename,
 	})
 	if err != nil {

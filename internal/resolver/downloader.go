@@ -232,6 +232,11 @@ func DownloadAndVerify(ctx context.Context, opts DownloadOptions) (*DownloadResu
 		if subtle.ConstantTimeCompare([]byte(computedHex), []byte(expectedHex)) != 1 {
 			bar.Abort()
 			_ = os.Remove(tmpPath)
+			if attempt == 0 && offset > 0 {
+				// Resumed prefix is stale (upstream asset changed): retry
+				// once from scratch instead of failing.
+				continue
+			}
 			return nil, fmt.Errorf("hash verification failed for %s: expected %s (%s), computed %s",
 				filepath.Base(opts.TargetPath), expectedHex, algo, computedHex)
 		}

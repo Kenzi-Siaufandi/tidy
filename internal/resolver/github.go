@@ -292,13 +292,25 @@ func (c *GitHubClient) Download(ctx context.Context, pluginName string, pCfg con
 		headers["Authorization"] = "Bearer " + strings.TrimSpace(c.Token)
 	}
 
+	// Use a long-timeout client for the (large) jar download; the API client
+	// default of 30s is too short for slow networks. Preserve the redirect
+	// guard that strips Authorization on host change.
+	downloadClient := c.HTTPClient
+	if downloadClient == nil || downloadClient.Timeout < 5*time.Minute {
+		downloadClient = &http.Client{Timeout: 5 * time.Minute, CheckRedirect: stripAuthOnRedirect}
+	} else if downloadClient.CheckRedirect == nil {
+		cp := *downloadClient
+		cp.CheckRedirect = stripAuthOnRedirect
+		downloadClient = &cp
+	}
+
 	res, err := DownloadAndVerify(ctx, DownloadOptions{
 		URL:           file.URL,
 		TargetPath:    targetPath,
 		ExpectedHash:  expectedSHA256,
 		HashAlgorithm: "sha256",
 		Headers:       headers,
-		Client:        c.HTTPClient,
+		Client:        downloadClient,
 		ProgressLabel: filename,
 	})
 	if err != nil {

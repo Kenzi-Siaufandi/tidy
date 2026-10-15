@@ -107,7 +107,7 @@ type PluginDownloadResult struct {
 // filters. An empty gameVersion disables the game_versions filter; loader is
 // always sent (defaults to "paper" via NormalizedLoader).
 func (c *ModrinthClient) fetchVersions(ctx context.Context, projectID, gameVersion, loader string, limit, offset int) ([]ModrinthVersion, error) {
-	endpoint := fmt.Sprintf("%s/v2/project/%s/version", c.BaseURL, projectID)
+	endpoint := fmt.Sprintf("%s/v2/project/%s/version", c.BaseURL, url.PathEscape(projectID))
 
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -160,7 +160,7 @@ func (c *ModrinthClient) fetchVersions(ctx context.Context, projectID, gameVersi
 // (GET /v2/project/{id}/version/{number}), falling back to "" when the pin is
 // a version ID or the endpoint 404s.
 func (c *ModrinthClient) fetchPinnedVersion(ctx context.Context, projectID, pin string) (*ModrinthVersion, error) {
-	endpoint := fmt.Sprintf("%s/v2/project/%s/version/%s", c.BaseURL, projectID, url.PathEscape(pin))
+	endpoint := fmt.Sprintf("%s/v2/project/%s/version/%s", c.BaseURL, url.PathEscape(projectID), url.PathEscape(pin))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -292,6 +292,32 @@ func (c *ModrinthClient) resolveLatest(ctx context.Context, pCfg config.PluginCo
 		channel, pCfg.ProjectID, loader, channel)
 }
 
+// loaderCompatible reports whether a Modrinth version's loader list satisfies
+// the requested loader. Empty lists pass (unverifiable). Matching is
+// case-insensitive. The bukkit/spigot/paper family is interchangeable because
+// Paper servers run bukkit/spigot jars that many projects publish without a
+// "paper" loader tag.
+func loaderCompatible(loaders []string, want string) bool {
+	want = strings.ToLower(strings.TrimSpace(want))
+	if want == "" || len(loaders) == 0 {
+		return true
+	}
+	for _, l := range loaders {
+		if strings.EqualFold(strings.TrimSpace(l), want) {
+			return true
+		}
+	}
+	family := map[string]bool{"bukkit": true, "spigot": true, "paper": true}
+	if family[want] {
+		for _, l := range loaders {
+			if family[strings.ToLower(strings.TrimSpace(l))] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // resolvePinned returns the exact version_number or version ID. An optional
 // game_version is enforced: the pin must list it or resolution fails. Loader
 // is intentionally NOT enforced for pins because Paper servers run
@@ -299,6 +325,7 @@ func (c *ModrinthClient) resolveLatest(ctx context.Context, pCfg config.PluginCo
 func (c *ModrinthClient) resolvePinned(ctx context.Context, pCfg config.PluginConfig) (*ModrinthVersion, *ModrinthFile, error) {
 	pin := strings.TrimSpace(pCfg.Version)
 	gameVersion := pCfg.NormalizedGameVersion()
+	loader := pCfg.NormalizedLoader()
 
 	if ver, err := c.fetchPinnedVersion(ctx, pCfg.ProjectID, pin); err != nil {
 		return nil, nil, err
@@ -311,11 +338,51 @@ func (c *ModrinthClient) resolvePinned(ctx context.Context, pCfg config.PluginCo
 		if err != nil {
 			return nil, nil, err
 		}
+		if loaderCompatible(ver.Loaders, loader) {
+			return ver, file, nil
+		}
+		// Direct hit has the wrong loader: scan the list for the same pin
+		// with a compatible loader before falling back to the direct hit.
+		for page := 0; page < pinnedMaxPages; page++ {
+			versions, err := c.fetchVersions(ctx, pCfg.ProjectID, "", "", pinnedPageLimit, page*pinnedPageLimit)
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(versions) == 0 {
+				break
+			}
+			for i := range versions {
+				v := &versions[i]
+				if !strings.EqualFold(v.VersionNumber, pin) && !strings.EqualFold(v.ID, pin) {
+					continue
+				}
+				if !supportsGameVersion(v, gameVersion) {
+					continue
+				}
+				if !loaderCompatible(v.Loaders, loader) {
+					continue
+				}
+				better, err := selectPrimaryFile(v)
+				if err != nil {
+					continue
+				}
+				return v, better, nil
+			}
+			if len(versions) < pinnedPageLimit {
+				break
+			}
+		}
+		fmt.Fprintf(os.Stderr, "warning: Modrinth version %q of project %q does not list loader %q (loaders: %s), using it anyway for bukkit compat\n",
+			pin, pCfg.ProjectID, loader, strings.Join(ver.Loaders, ", "))
 		return ver, file, nil
 	}
 
 	// Fallback: scan the unfiltered list (covers version IDs and servers
-	// that 404 the direct endpoint).
+	// that 404 the direct endpoint). Prefer a loader-compatible match for
+	// the same pin; keep the first pin+game_version match as a fallback so
+	// bukkit-on-paper pins keep resolving.
+	var fallbackVer *ModrinthVersion
+	var fallbackFile *ModrinthFile
 	for page := 0; page < pinnedMaxPages; page++ {
 		versions, err := c.fetchVersions(ctx, pCfg.ProjectID, "", "", pinnedPageLimit, page*pinnedPageLimit)
 		if err != nil {
@@ -337,11 +404,24 @@ func (c *ModrinthClient) resolvePinned(ctx context.Context, pCfg config.PluginCo
 			if err != nil {
 				return nil, nil, err
 			}
-			return v, file, nil
+			if loaderCompatible(v.Loaders, loader) {
+				return v, file, nil
+			}
+			if fallbackVer == nil {
+				cpVer := *v
+				cpFile := *file
+				fallbackVer = &cpVer
+				fallbackFile = &cpFile
+			}
 		}
 		if len(versions) < pinnedPageLimit {
 			break
 		}
+	}
+	if fallbackVer != nil {
+		fmt.Fprintf(os.Stderr, "warning: Modrinth version %q of project %q does not list loader %q (loaders: %s), using it anyway for bukkit compat\n",
+			pin, pCfg.ProjectID, loader, strings.Join(fallbackVer.Loaders, ", "))
+		return fallbackVer, fallbackFile, nil
 	}
 
 	return nil, nil, fmt.Errorf("version %q not found on Modrinth for project %q", pin, pCfg.ProjectID)
@@ -390,13 +470,20 @@ func (c *ModrinthClient) Download(ctx context.Context, pluginName string, pCfg c
 		"User-Agent": c.UserAgent,
 	}
 
+	// Use a long-timeout client for the (large) jar download; the API client
+	// default of 30s is too short for slow networks.
+	downloadClient := c.HTTPClient
+	if downloadClient == nil || downloadClient.Timeout < 5*time.Minute {
+		downloadClient = &http.Client{Timeout: 5 * time.Minute}
+	}
+
 	res, err := DownloadAndVerify(ctx, DownloadOptions{
 		URL:           file.URL,
 		TargetPath:    targetPath,
 		ExpectedHash:  expectedHash,
 		HashAlgorithm: hashAlgo,
 		Headers:       headers,
-		Client:        c.HTTPClient,
+		Client:        downloadClient,
 		ProgressLabel: filename,
 	})
 	if err != nil {
