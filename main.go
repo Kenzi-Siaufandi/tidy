@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +54,13 @@ const driftDiffFilesCap = 10
 // driftDiffLinesCap bounds each file's diff so one huge config can't flood
 // the panel disk (reports are never pruned).
 const driftDiffLinesCap = 80
+
+// maxRetainedRunLogs caps .tidy/log/ retention (N=50): every run writes one
+// file, crash loops would otherwise fill disk/inodes.
+const maxRetainedRunLogs = 50
+
+// maxRetainedDriftReports caps .tidy/drift/ retention (N=50).
+const maxRetainedDriftReports = 50
 
 // driftReportName returns the report path for a run timestamp, e.g.
 // .tidy/drift/drift-2026-09-23_05-30-24.txt. Hyphens keep it shell/panel-safe.
@@ -244,7 +252,7 @@ func reportDrift(ctx context.Context, gitClient *git.Client, workDir, configFlag
 	var churnSkipped int
 	diffs := make(map[string]string)
 	for _, p := range drift.Modified {
-		if templated[p] || isTidyInternal(p) {
+		if isTidyInternal(p) {
 			continue
 		}
 		d, err := gitClient.DiffTracked(ctx, workDir, p)
@@ -257,6 +265,27 @@ func reportDrift(ctx context.Context, gitClient *git.Client, workDir, configFlag
 			// header the server rewrites on every boot): not drift.
 			churnSkipped++
 			continue
+		}
+		// Templated files need masking, not skipping: re-apply template
+		// substitution to the HEAD blob in memory and compare against the
+		// working file. Pure templating differences are expected-dirty;
+		// real user edits are reported with secrets masked.
+		if templated[p] || previousState == nil {
+			masked, isOnlyTemplate := maskedTemplatedDiff(ctx, gitClient, workDir, p, d)
+			if isOnlyTemplate {
+				churnSkipped++
+				continue
+			}
+			if masked != "" {
+				d = masked
+			}
+			// previousState==nil means we cannot know templated set:
+			// still mask any file whose HEAD contains {{VAR}}.
+			if previousState == nil && masked == "" && !templated[p] {
+				if m, ok := maskSecretsInDiff(ctx, gitClient, workDir, p, d); ok {
+					d = m
+				}
+			}
 		}
 		modified = append(modified, p)
 		diffs[p] = d
@@ -283,6 +312,141 @@ func reportDrift(ctx context.Context, gitClient *git.Client, workDir, configFlag
 	}
 	fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Git: %d file(s) differ from the remote — see %s",
 		len(modified)+len(untracked), reportName)))
+}
+
+// maskedTemplatedDiff compares the working file against the HEAD blob with
+// template substitution re-applied in memory. It returns (maskedDiff, true)
+// when the only differences are templating + volatile date comments
+// (expected-dirty, skip), or (maskedDiff, false) when real user edits exist.
+// maskedDiff has secret env values replaced with {{VAR}} so drift reports
+// never leak plaintext secrets into world-readable files.
+func maskedTemplatedDiff(ctx context.Context, gitClient *git.Client, workDir, relPath, rawDiff string) (string, bool) {
+	head, err := gitClient.ShowHeadFile(ctx, workDir, relPath)
+	if err != nil || head == "" {
+		// Cannot mask without HEAD: keep raw diff (caller reports it).
+		return "", false
+	}
+	if !strings.Contains(head, "{{") {
+		return "", false
+	}
+	expected, _, _ := templating.ReplaceString(head)
+	workBytes, err := os.ReadFile(filepath.Join(workDir, filepath.FromSlash(relPath)))
+	if err != nil {
+		return "", false
+	}
+	if contentsEqualIgnoringVolatile(expected, string(workBytes)) {
+		return "", true
+	}
+	// Previous run's env may differ from current (or test env unset):
+	// if working matches the HEAD template shape (literals in order),
+	// it is pure templating output, not a panel edit.
+	if templateShapeMatches(head, string(workBytes)) {
+		return "", true
+	}
+	return maskValuesInText(rawDiff, placeholdersIn(head)), false
+}
+
+// maskSecretsInDiff masks secret values in a diff for files whose HEAD
+// contains {{VAR}} placeholders. ok=false when no masking applied.
+func maskSecretsInDiff(ctx context.Context, gitClient *git.Client, workDir, relPath, rawDiff string) (string, bool) {
+	head, err := gitClient.ShowHeadFile(ctx, workDir, relPath)
+	if err != nil || head == "" || !strings.Contains(head, "{{") {
+		return "", false
+	}
+	return maskValuesInText(rawDiff, placeholdersIn(head)), true
+}
+
+// placeholdersIn returns distinct {{VAR}} names found in content.
+func placeholdersIn(content string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range templating.MustacheVariableRegex.FindAllStringSubmatch(content, -1) {
+		if len(m) < 2 || seen[m[1]] {
+			continue
+		}
+		seen[m[1]] = true
+		out = append(out, m[1])
+	}
+	return out
+}
+
+// maskValuesInText replaces non-empty env values for vars with {{VAR}} so
+// reports show the placeholder instead of the secret.
+func maskValuesInText(text string, vars []string) string {
+	for _, v := range vars {
+		if val, ok := os.LookupEnv(v); ok && val != "" && len(val) >= 3 {
+			text = strings.ReplaceAll(text, val, "{{"+v+"}}")
+		}
+	}
+	return text
+}
+
+// templateShapeMatches reports whether working could be head with every
+// {{VAR}} replaced by some value: all literal segments between placeholders
+// appear in order. Distinguishes pure templating output (previous run's env,
+// possibly unset now) from real panel edits elsewhere.
+func templateShapeMatches(head, working string) bool {
+	locs := templating.MustacheVariableRegex.FindAllStringIndex(head, -1)
+	if len(locs) == 0 {
+		return false
+	}
+	var lits []string
+	prev := 0
+	for _, l := range locs {
+		lits = append(lits, head[prev:l[0]])
+		prev = l[1]
+	}
+	lits = append(lits, head[prev:])
+	pos := 0
+	for i, lit := range lits {
+		if lit == "" {
+			continue
+		}
+		if i == 0 {
+			if strings.HasPrefix(working[pos:], lit) {
+				pos += len(lit)
+				continue
+			}
+			idx := strings.Index(working[pos:], lit)
+			if idx < 0 {
+				return false
+			}
+			pos += idx + len(lit)
+			continue
+		}
+		if i == len(lits)-1 {
+			if lit == "\n" {
+				return true
+			}
+			return strings.HasSuffix(working, lit) || strings.Contains(working[pos:], lit)
+		}
+		idx := strings.Index(working[pos:], lit)
+		if idx < 0 {
+			return false
+		}
+		pos += idx + len(lit)
+	}
+	return true
+}
+
+// contentsEqualIgnoringVolatile compares two file contents ignoring volatile
+// date-comment lines (server.properties header rewritten every boot).
+func contentsEqualIgnoringVolatile(a, b string) bool {
+	strip := func(s string) string {
+		var kept []string
+		for _, l := range strings.Split(s, "\n") {
+			t := strings.TrimRight(l, "\r")
+			if volatileDateComment.MatchString(strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(t, "+"), "-"))) {
+				continue
+			}
+			if volatileDateComment.MatchString(strings.TrimSpace(t)) {
+				continue
+			}
+			kept = append(kept, t)
+		}
+		return strings.Join(kept, "\n")
+	}
+	return strip(a) == strip(b)
 }
 
 // configRelPath returns the config path repo-relative in slash form, or ""
@@ -312,7 +476,7 @@ func formatDriftReport(modified, untracked []string, diffs map[string]string, ch
 	b.WriteString("# Written before the git sync.\n")
 	b.WriteString("# 'Discarded' files are tracked and were reset (reset --hard): commit them to keep them.\n")
 	b.WriteString("# 'Kept' files are untracked: git left them alone, but the remote does not know them.\n")
-	b.WriteString("# Files templated ({{VAR}}) by the previous run are expected-dirty and hidden.\n")
+	b.WriteString("# Files templated ({{VAR}}) show masked diffs (secrets as {{VAR}}); pure templating is filtered.\n")
 	b.WriteString("# Diffs below are what the sync discarded (unified diff vs HEAD).\n")
 	if churnSkipped > 0 {
 		fmt.Fprintf(&b, "# %d file(s) differed only by volatile date comments (e.g. the server.properties header) and were ignored.\n", churnSkipped)
@@ -384,13 +548,80 @@ func writeDiffSection(b *strings.Builder, modified []string, diffs map[string]st
 }
 
 // writeDriftReport persists the dated drift report under .tidy/drift.
-// Best-effort.
+// Best-effort. Retention is capped at maxRetainedDriftReports (N=50).
 func writeDriftReport(workDir, reportName string, now time.Time, modified, untracked []string, diffs map[string]string, churnSkipped int) {
 	if err := os.MkdirAll(filepath.Join(workDir, driftReportDir), 0755); err != nil {
 		return
 	}
 	content := formatDriftReport(modified, untracked, diffs, churnSkipped, now)
 	_ = os.WriteFile(filepath.Join(workDir, reportName), []byte(content), 0644)
+	pruneOldFiles(filepath.Join(workDir, driftReportDir), "drift-", ".txt", maxRetainedDriftReports)
+}
+
+// sameFileOnDisk reports whether two absolute paths resolve to the same file
+func sameFileOnDisk(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	ai, aerr := os.Stat(a)
+	bi, berr := os.Stat(b)
+	if aerr != nil || berr != nil {
+		// Fall back to case-insensitive name comparison when stats fail
+		// (e.g. old was already replaced): Vault.jar vs vault.jar must not
+		// trigger a delete of the new file.
+		return strings.EqualFold(a, b)
+	}
+	return os.SameFile(ai, bi)
+}
+
+// safeRemoveOldFile removes oldAbs only when it is not the same file as
+// newAbs (SameFile or case-only name match). Returns true when a delete was
+// attempted.
+func safeRemoveOldFile(workDir, oldRaw, newAbs string, isPlugin bool) {
+	if oldRaw == "" || newAbs == "" {
+		return
+	}
+	var oldAbs string
+	var err error
+	if isPlugin {
+		oldAbs, err = statePluginPath(workDir, oldRaw)
+	} else {
+		oldAbs, err = stateWorkdirPath(workDir, oldRaw)
+	}
+	if err != nil {
+		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: skipping removal of suspicious state filename %q: %v", oldRaw, err)))
+		return
+	}
+	if oldAbs == newAbs || sameFileOnDisk(oldAbs, newAbs) {
+		return
+	}
+	// Extra guard for case-only renames on case-insensitive filesystems:
+	// Vault.jar -> vault.jar would otherwise delete the just-downloaded jar.
+	if strings.EqualFold(oldAbs, newAbs) {
+		return
+	}
+	if isPlugin {
+		removeStatePluginFile(workDir, oldRaw)
+	} else {
+		removeStateWorkdirFile(workDir, oldRaw)
+	}
+}
+
+// activePluginFilename returns a best-effort filename for an active plugin
+// config (local source only; remote sources resolve filenames at download
+// time so "" is returned). Used to avoid deleting a file still referenced
+// after a key rename.
+func activePluginFilename(pCfg config.PluginConfig, workDir string) string {
+	if strings.ToLower(strings.TrimSpace(pCfg.Source)) != "local" {
+		return ""
+	}
+	if _, fn, err := resolver.ResolveLocalPath(pCfg, workDir); err == nil {
+		return fn
+	}
+	return ""
 }
 
 // ansiSGR matches SGR color codes (see internal/ui) so run logs stay plain
@@ -408,6 +639,7 @@ var (
 // untouched. Best-effort: when the log cannot be created the run proceeds
 // unlogged. The log carries plain text (color codes stripped, \r progress
 // redraws folded to newlines) so it reads well in the panel file manager.
+// Retention is capped at maxRetainedRunLogs (N=50).
 func startRunLog(workDir string, now time.Time) {
 	if err := os.MkdirAll(filepath.Join(workDir, runLogDir), 0755); err != nil {
 		return
@@ -420,10 +652,39 @@ func startRunLog(workDir string, now time.Time) {
 	runLogFile = f
 	os.Stdout = teeToLog(os.Stdout, f)
 	os.Stderr = teeToLog(os.Stderr, f)
+	pruneOldFiles(filepath.Join(workDir, runLogDir), "tidy-", ".log", maxRetainedRunLogs)
+}
+
+// pruneOldFiles keeps only the newest keep files matching prefix+*+ext in
+// dir, sorted by name (datetime names sort chronologically). Best-effort.
+func pruneOldFiles(dir, prefix, ext string, keep int) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || keep <= 0 {
+		return
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		if strings.HasPrefix(n, prefix) && strings.HasSuffix(n, ext) {
+			names = append(names, n)
+		}
+	}
+	if len(names) <= keep {
+		return
+	}
+	sort.Strings(names)
+	for _, n := range names[:len(names)-keep] {
+		_ = os.Remove(filepath.Join(dir, n))
+	}
 }
 
 // teeToLog swaps dst for a pipe writer and streams everything written to it
-// to both dst and the run log.
+// to both dst and the run log. ANSI stripping buffers a trailing partial
+// escape (e.g. "\x1b[" split across 32KiB reads) so split sequences never
+// leak raw bytes into the log.
 func teeToLog(dst *os.File, log *os.File) *os.File {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -435,21 +696,63 @@ func teeToLog(dst *os.File, log *os.File) *os.File {
 		defer runLogWait.Done()
 		defer r.Close()
 		buf := make([]byte, 32*1024)
+		var pending []byte
 		for {
 			n, rerr := r.Read(buf)
 			if n > 0 {
 				chunk := buf[:n]
 				_, _ = dst.Write(chunk)
-				plain := ansiSGR.ReplaceAll(chunk, nil)
+				combined := chunk
+				if len(pending) > 0 {
+					combined = append(append([]byte(nil), pending...), chunk...)
+					pending = nil
+				}
+				// Hold a trailing partial SGR prefix for the next chunk.
+				if idx := bytes.LastIndexByte(combined, 0x1b); idx >= 0 {
+					tail := combined[idx:]
+					if isPartialSGR(tail) {
+						pending = append([]byte(nil), tail...)
+						combined = combined[:idx]
+					}
+				}
+				plain := ansiSGR.ReplaceAll(combined, nil)
 				plain = bytes.ReplaceAll(plain, []byte("\r"), []byte("\n"))
 				_, _ = log.Write(plain)
 			}
 			if rerr != nil {
+				// Flush any held partial sequence as plain text.
+				if len(pending) > 0 {
+					plain := ansiSGR.ReplaceAll(pending, nil)
+					_, _ = log.Write(plain)
+					pending = nil
+				}
 				return
 			}
 		}
 	}()
 	return w
+}
+
+// isPartialSGR reports whether tail looks like a truncated SGR escape:
+// "\x1b" or "\x1b[" followed only by digits/semicolons with no final byte.
+func isPartialSGR(tail []byte) bool {
+	if len(tail) == 0 || tail[0] != 0x1b {
+		return false
+	}
+	if len(tail) == 1 {
+		return true
+	}
+	if tail[1] != '[' {
+		return false
+	}
+	for _, c := range tail[2:] {
+		if (c >= '0' && c <= '9') || c == ';' {
+			continue
+		}
+		// A final letter completes the sequence: not partial.
+		return false
+	}
+	return true
 }
 
 // finishRunLog drains the tee goroutines and closes the run log. It must
@@ -544,14 +847,17 @@ func main() {
 		exitWithLog(1)
 	}
 
+	// --version must not create .tidy/log/ entries (entrypoint runs
+	// `tidy --version` on every boot; logging it would litter logs and
+	// fill disk/inodes in crash loops).
+	if *versionFlag {
+		fmt.Printf("Tidy v%s\n", Version)
+		os.Exit(0)
+	}
+
 	// Log every run under .tidy/log/ from here on (banner included).
 	progress.ForceLive = isCharDevice(os.Stderr)
 	startRunLog(workDir, time.Now())
-
-	if *versionFlag {
-		fmt.Printf("Tidy v%s\n", Version)
-		exitWithLog(0)
-	}
 
 	fmt.Println(ui.Bold("=================================================================="))
 	fmt.Printf("  Tidy v%s \n", Version)
@@ -763,8 +1069,16 @@ func main() {
 		activeServerSHA256 = serverRes.SHA256
 		activeServerBuildID = serverRes.BuildID
 		// Atomic upgrade: remove stale jar only after success and only if name changed.
+		// Case-only renames (Vault.jar -> vault.jar) on case-insensitive
+		// filesystems overwrote in place via Rename: never delete the new jar.
 		if prevFilename != "" && prevFilename != activeServerFilename {
-			removeStateWorkdirFile(workDir, prevFilename)
+			newPath := filepath.Join(workDir, activeServerFilename)
+			oldPath, olderr := stateWorkdirPath(workDir, prevFilename)
+			if olderr != nil {
+				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: skipping removal of suspicious state filename %q: %v", prevFilename, olderr)))
+			} else if !sameFileOnDisk(oldPath, newPath) && !strings.EqualFold(oldPath, newPath) {
+				removeStateWorkdirFile(workDir, prevFilename)
+			}
 		}
 	}
 
@@ -784,22 +1098,46 @@ func main() {
 	ghClient := resolver.NewGitHubClient("", gitToken, nil)
 
 	// A. Detect removed plugins (present in previous state but removed from tidy.toml)
+	// source="local" jars are manually uploaded: never delete them from disk.
+	// Renames (Foo -> Bar with same path) must not delete the file Step 4B
+	// still needs to verify.
 	if previousState != nil {
+		activeLocalPaths := map[string]bool{}
+		activeFilenames := map[string]bool{}
+		for _, pCfg := range cfg.Plugins {
+			if strings.ToLower(strings.TrimSpace(pCfg.Source)) == "local" && strings.TrimSpace(pCfg.Path) != "" {
+				if abs, _, err := resolver.ResolveLocalPath(pCfg, workDir); err == nil {
+					activeLocalPaths[abs] = true
+				}
+			}
+			if fn := activePluginFilename(pCfg, workDir); fn != "" {
+				activeFilenames[fn] = true
+			}
+		}
 		for oldName, oldP := range previousState.Plugins {
 			if _, stillPresent := cfg.Plugins[oldName]; !stillPresent {
 				oldSource := strings.ToLower(strings.TrimSpace(oldP.Source))
-				oldPath, pathErr := statePluginPath(workDir, oldP.Filename)
-				if oldSource == "local" && strings.TrimSpace(oldP.Path) != "" {
-					if abs, _, err := resolver.ResolveLocalPath(config.PluginConfig{Path: oldP.Path}, workDir); err == nil {
-						oldPath, pathErr = abs, nil
-					} else {
-						pathErr = err
-					}
+				if oldSource == "local" {
+					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[-] Plugin [%s]: Removed from tidy.toml. Keeping manually-uploaded local file %s (never auto-deleted)...", oldName, oldP.Filename)))
+					continue
 				}
-				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[-] Plugin [%s]: Removed from tidy.toml. Deleting %s...", oldName, oldP.Filename)))
+				oldPath, pathErr := statePluginPath(workDir, oldP.Filename)
 				if pathErr != nil {
 					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: skipping removal of suspicious state filename %q: %v", oldP.Filename, pathErr)))
-				} else if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+					continue
+				}
+				// Same file still referenced by an active plugin (e.g. rename
+				// Foo -> Bar keeping path): never delete out from under Step 4B.
+				if activeFilenames[oldP.Filename] {
+					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[-] Plugin [%s]: Removed from tidy.toml but %s is still referenced by active config. Keeping...", oldName, oldP.Filename)))
+					continue
+				}
+				if abs, _, err := resolver.ResolveLocalPath(config.PluginConfig{Path: oldP.Filename}, workDir); err == nil && activeLocalPaths[abs] {
+					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[-] Plugin [%s]: Removed from tidy.toml but path still referenced. Keeping %s...", oldName, oldP.Filename)))
+					continue
+				}
+				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[-] Plugin [%s]: Removed from tidy.toml. Deleting %s...", oldName, oldP.Filename)))
+				if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
 					fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: failed to delete removed plugin %s: %v", oldPath, err)))
 				}
 			}
@@ -929,7 +1267,7 @@ func main() {
 					SHA256:          res.SHA256,
 				}
 				if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
-					removeStatePluginFile(workDir, oldPlugin.Filename)
+					safeRemoveOldFile(workDir, oldPlugin.Filename, res.FilePath, true)
 				}
 				// The jar is swapped but the plugin's on-disk configs/data are
 				// left untouched, so a breaking update can load stale files.
@@ -1000,7 +1338,7 @@ func main() {
 				SHA256:   res.SHA256,
 			}
 			if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
-				removeStatePluginFile(workDir, oldPlugin.Filename)
+				safeRemoveOldFile(workDir, oldPlugin.Filename, res.FilePath, true)
 			}
 		case "github":
 			storeGitHub := func(res *resolver.PluginDownloadResult) {
@@ -1018,7 +1356,7 @@ func main() {
 					SHA256:          res.SHA256,
 				}
 				if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
-					removeStatePluginFile(workDir, oldPlugin.Filename)
+					safeRemoveOldFile(workDir, oldPlugin.Filename, res.FilePath, true)
 				}
 				// The jar is swapped but the plugin's on-disk configs/data are
 				// left untouched, so a breaking update can load stale files.
@@ -1087,22 +1425,15 @@ func main() {
 				Hash:     res.Hash,
 				SHA256:   res.SHA256,
 			}
-			if oldPlugin != nil && strings.ToLower(strings.TrimSpace(oldPlugin.Source)) == "local" {
-				oldAbs := ""
-				if strings.TrimSpace(oldPlugin.Path) != "" {
-					if abs, _, err := resolver.ResolveLocalPath(config.PluginConfig{Path: oldPlugin.Path}, workDir); err == nil {
-						oldAbs = abs
+			// Local jars are manually uploaded: never auto-delete the old
+				// path on renames. Step 4A already keeps them; deleting here
+				// would permanently brick source="local" plugins.
+				if oldPlugin != nil && strings.ToLower(strings.TrimSpace(oldPlugin.Source)) == "local" {
+					if oldAbs, _, err := resolver.ResolveLocalPath(config.PluginConfig{Path: strings.TrimSpace(oldPlugin.Path)}, workDir); err == nil && oldAbs != res.FilePath {
+						if _, statErr := os.Stat(oldAbs); statErr == nil {
+							fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: previous local file kept at %s (manual cleanup if unneeded)", pluginName, oldPlugin.Path)))
+						}
 					}
-				} else if oldPlugin.Filename != "" {
-					if p, err := statePluginPath(workDir, oldPlugin.Filename); err == nil {
-						oldAbs = p
-					} else {
-						fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: skipping removal of suspicious state filename %q: %v", oldPlugin.Filename, err)))
-					}
-				}
-				if oldAbs != "" && oldAbs != res.FilePath {
-					_ = os.Remove(oldAbs)
-				}
 			}
 		default:
 			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: plugin %q has unsupported source %q (supported: 'modrinth', 'url', 'github', 'local')", pluginName, pCfg.Source)))
@@ -1116,7 +1447,14 @@ func main() {
 	if len(allFiles) > 0 {
 		storageMgr := storage.NewManager(nil)
 		for name, fCfg := range allFiles {
-			syncRes, err := storageMgr.SyncFile(ctx, name, fCfg, workDir)
+			var prevFile *state.FileState
+			if previousState != nil {
+				if pf, ok := previousState.Files[name]; ok {
+					cp := pf
+					prevFile = &cp
+				}
+			}
+			syncRes, err := storageMgr.SyncFileWithState(ctx, name, fCfg, workDir, prevFile)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to synchronize file/world %q: %v", name, err)))
 				exitWithLog(1)
@@ -1134,10 +1472,14 @@ func main() {
 				}
 			}
 
+			effectiveSHA := syncRes.SHA256
+			if effectiveSHA == "" && prevFile != nil {
+				effectiveSHA = prevFile.SHA256
+			}
 			installedFiles[name] = state.FileState{
 				Path:      fCfg.Path,
 				URL:       fCfg.URL,
-				SHA256:    syncRes.SHA256,
+				SHA256:    effectiveSHA,
 				SyncedAt:  time.Now().UTC(),
 				Extracted: fCfg.Extract,
 			}
