@@ -336,43 +336,22 @@ func templateShapeMatches(head, working string) bool {
 	if len(locs) == 0 {
 		return false
 	}
-	var lits []string
+	// Match the entire file, not just ordered literal fragments. Unknown
+	// historical values may occupy a field, but cannot swallow new lines
+	// containing additional settings. Multiline values only qualify via
+	// the exact current-environment comparison above.
+	var pattern strings.Builder
+	pattern.WriteString(`\A`)
 	prev := 0
-	for _, l := range locs {
-		lits = append(lits, head[prev:l[0]])
-		prev = l[1]
+	for _, loc := range locs {
+		pattern.WriteString(regexp.QuoteMeta(head[prev:loc[0]]))
+		pattern.WriteString(`[^\r\n]*`)
+		prev = loc[1]
 	}
-	lits = append(lits, head[prev:])
-	pos := 0
-	for i, lit := range lits {
-		if lit == "" {
-			continue
-		}
-		if i == 0 {
-			if strings.HasPrefix(working[pos:], lit) {
-				pos += len(lit)
-				continue
-			}
-			idx := strings.Index(working[pos:], lit)
-			if idx < 0 {
-				return false
-			}
-			pos += idx + len(lit)
-			continue
-		}
-		if i == len(lits)-1 {
-			if lit == "\n" {
-				return true
-			}
-			return strings.HasSuffix(working, lit) || strings.Contains(working[pos:], lit)
-		}
-		idx := strings.Index(working[pos:], lit)
-		if idx < 0 {
-			return false
-		}
-		pos += idx + len(lit)
-	}
-	return true
+	pattern.WriteString(regexp.QuoteMeta(head[prev:]))
+	pattern.WriteString(`\z`)
+	re, err := regexp.Compile(pattern.String())
+	return err == nil && re.MatchString(working)
 }
 
 // contentsEqualIgnoringVolatile compares two file contents ignoring volatile
