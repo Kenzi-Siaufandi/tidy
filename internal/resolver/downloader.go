@@ -23,12 +23,13 @@ import (
 
 // DownloadOptions contains options for downloading and verifying a file.
 type DownloadOptions struct {
-	URL           string
-	TargetPath    string
-	ExpectedHash  string
-	HashAlgorithm string // "sha256", "sha512", "sha1", "md5"
-	Headers       map[string]string
-	Client        *http.Client
+	URL            string
+	TargetPath     string
+	ExpectedHash   string
+	HashAlgorithm  string // "sha256", "sha512", "sha1", "md5"
+	ExpectedSHA256 string // optional additional pin, verified before promotion
+	Headers        map[string]string
+	Client         *http.Client
 	// ProgressLabel enables a stderr progress bar for this download (see
 	// internal/progress). Empty disables it. Rendering is globally gated by
 	// progress.Enabled, which the CLI sets and tests leave off.
@@ -239,6 +240,19 @@ func DownloadAndVerify(ctx context.Context, opts DownloadOptions) (*DownloadResu
 			}
 			return nil, fmt.Errorf("hash verification failed for %s: expected %s (%s), computed %s",
 				filepath.Base(opts.TargetPath), expectedHex, algo, computedHex)
+		}
+		if pin := strings.TrimSpace(opts.ExpectedSHA256); pin != "" {
+			shaHasher := sha256.New()
+			if !seedHasherWithFile(shaHasher, tmpPath) {
+				bar.Abort()
+				return nil, fmt.Errorf("failed to compute SHA-256 for staged download")
+			}
+			computedSHA := hex.EncodeToString(shaHasher.Sum(nil))
+			if !strings.EqualFold(computedSHA, pin) {
+				bar.Abort()
+				_ = os.Remove(tmpPath)
+				return nil, fmt.Errorf("SHA-256 verification failed for %s: expected %s, computed %s", filepath.Base(opts.TargetPath), pin, computedSHA)
+			}
 		}
 		bar.Finish()
 

@@ -478,13 +478,14 @@ func (c *ModrinthClient) Download(ctx context.Context, pluginName string, pCfg c
 	}
 
 	res, err := DownloadAndVerify(ctx, DownloadOptions{
-		URL:           file.URL,
-		TargetPath:    targetPath,
-		ExpectedHash:  expectedHash,
-		HashAlgorithm: hashAlgo,
-		Headers:       headers,
-		Client:        downloadClient,
-		ProgressLabel: filename,
+		URL:            file.URL,
+		TargetPath:     targetPath,
+		ExpectedHash:   expectedHash,
+		HashAlgorithm:  hashAlgo,
+		ExpectedSHA256: strings.TrimSpace(pCfg.SHA256),
+		Headers:        headers,
+		Client:         downloadClient,
+		ProgressLabel:  filename,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to download and verify plugin %s from Modrinth: %w", pluginName, err)
@@ -495,15 +496,6 @@ func (c *ModrinthClient) Download(ctx context.Context, pluginName string, pCfg c
 	if err != nil {
 		_ = os.Remove(res.Path)
 		return nil, fmt.Errorf("failed to compute SHA-256 for plugin %s: %w", pluginName, err)
-	}
-
-	// If user explicitly configured sha256 in tidy.toml, enforce it
-	if expectedSHA := strings.TrimSpace(pCfg.SHA256); expectedSHA != "" {
-		if !strings.EqualFold(computedSHA256, expectedSHA) {
-			_ = os.Remove(res.Path)
-			return nil, fmt.Errorf("SHA-256 verification failed for Modrinth plugin %s: expected %s, computed %s",
-				pluginName, expectedSHA, computedSHA256)
-		}
 	}
 
 	return &PluginDownloadResult{
