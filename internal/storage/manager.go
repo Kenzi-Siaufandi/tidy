@@ -133,8 +133,8 @@ func (m *Manager) SyncFile(ctx context.Context, name string, fCfg config.FileCon
 }
 
 // SyncFileWithState is SyncFile with previous state for idempotency:
-// once=false skips when local hash already matches; once=true re-syncs when
-// url/sha256 changed versus previous state, otherwise protects existing data.
+// once=false skips when local hash already matches; once=true always protects
+// existing data, even when the configured URL or checksum changes.
 func (m *Manager) SyncFileWithState(ctx context.Context, name string, fCfg config.FileConfig, workDir string, prev *state.FileState) (*SyncResult, error) {
 	destPath, err := resolveDestPath(workDir, fCfg.Path)
 	if err != nil {
@@ -152,35 +152,18 @@ func (m *Manager) SyncFileWithState(ctx context.Context, name string, fCfg confi
 
 	// 1. Idempotency against previous state and local disk.
 	wantSHA := strings.ToLower(strings.TrimSpace(fCfg.SHA256))
-	wantURL := strings.TrimSpace(fCfg.URL)
 	if _, statErr := os.Stat(destPath); statErr == nil {
 		if fCfg.IsOnce() {
-			// once=true protects existing data, but a url/sha256 change
-			// versus previous state must take effect (otherwise config
-			// edits are silently ignored).
-			if prev != nil && strings.TrimSpace(prev.SHA256) != "" {
-				prevSHA := strings.ToLower(strings.TrimSpace(prev.SHA256))
-				prevURL := strings.TrimSpace(prev.URL)
-				if prevSHA == wantSHA && (prevURL == "" || prevURL == wantURL) {
-					return &SyncResult{
-						Name:    name,
-						Path:    destPath,
-						SHA256:  prev.SHA256,
-						Skipped: true,
-						Reason:  "target path already exists and matches state (once=true)",
-					}, nil
-				}
-				// Config changed vs state: fall through to re-download.
-			} else {
-				// No state (first install with pre-existing files): protect.
-				return &SyncResult{
-					Name:    name,
-					Path:    destPath,
-					SHA256:  "",
-					Skipped: true,
-					Reason:  "target path already exists on disk (once=true, unverified)",
-				}, nil
+			// Existing worlds may contain live player data. A new URL or
+			// checksum is not permission to reset them to a template.
+			hash := ""
+			if prev != nil && filepath.Clean(prev.Path) == filepath.Clean(fCfg.Path) {
+				hash = prev.SHA256
 			}
+			return &SyncResult{
+				Name: name, Path: destPath, SHA256: hash, Skipped: true,
+				Reason: "target path already exists on disk (once=true, not reverified)",
+			}, nil
 		} else {
 			// once=false: skip when local content already matches wantSHA.
 			if !fCfg.Extract {

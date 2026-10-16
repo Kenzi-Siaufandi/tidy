@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Kenzi-Siaufandi/tidy/internal/config"
+	"github.com/Kenzi-Siaufandi/tidy/internal/state"
 )
 
 func TestReservedDestinations(t *testing.T) {
@@ -30,6 +31,32 @@ func TestReservedDestinations(t *testing.T) {
 	}
 	if data, err := os.ReadFile(marker); err != nil || string(data) != "keep" {
 		t.Fatalf("original data lost: %v", err)
+	}
+}
+
+func TestOncePreservesExistingDataAfterConfigChanges(t *testing.T) {
+	for _, extract := range []bool{false, true} {
+		root := t.TempDir()
+		dest := filepath.Join(root, "data")
+		marker := dest
+		if extract {
+			if err := os.Mkdir(dest, 0700); err != nil {
+				t.Fatal(err)
+			}
+			marker = filepath.Join(dest, "player-progress.dat")
+		}
+		if err := os.WriteFile(marker, []byte("live data"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		for _, prev := range []*state.FileState{nil, {Path: "data", URL: "https://old.invalid", SHA256: "old-hash"}} {
+			result, err := NewManager(nil).SyncFileWithState(context.Background(), "test", config.FileConfig{Path: "data", URL: "https://new.invalid", SHA256: "new-hash", Extract: extract}, root, prev)
+			if err != nil || !result.Skipped {
+				t.Fatalf("once=true must skip config changes: %v", err)
+			}
+			if data, err := os.ReadFile(marker); err != nil || string(data) != "live data" {
+				t.Fatalf("live data lost: %v", err)
+			}
+		}
 	}
 }
 
