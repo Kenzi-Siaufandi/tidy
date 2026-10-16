@@ -328,6 +328,10 @@ func (c *Config) Validate() error {
 			if filepath.IsAbs(rawPath) {
 				return fmt.Errorf("%s %q: 'path' must be relative to the workdir, got absolute path %q", sectionName, name, f.Path)
 			}
+			cleanPath := filepath.ToSlash(filepath.Clean(rawPath))
+			if cleanPath == "." || cleanPath == ".tidy" || strings.HasPrefix(cleanPath, ".tidy/") || cleanPath == ".git" || strings.HasPrefix(cleanPath, ".git/") {
+				return fmt.Errorf("%s %q: 'path' must not target the workdir or its .tidy/.git internals", sectionName, name)
+			}
 			for _, part := range strings.Split(filepath.ToSlash(rawPath), "/") {
 				if part == ".." {
 					return fmt.Errorf("%s %q: 'path' must not contain parent directory traversals (..)", sectionName, name)

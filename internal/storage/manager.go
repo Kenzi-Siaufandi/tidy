@@ -63,6 +63,9 @@ func resolveDestPath(workDir, configuredPath string) (string, error) {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("destination path %q must stay inside the workdir", configuredPath)
 	}
+	if err := rejectReservedDestination(rel); err != nil {
+		return "", err
+	}
 	// Symlink-aware containment: resolve the nearest existing ancestor and
 	// ensure it (plus the lexical remainder) stays inside the real workdir.
 	realWork := workAbs
@@ -88,6 +91,17 @@ func resolveDestPath(workDir, configuredPath string) (string, error) {
 	}
 	if _, lerr := os.Lstat(existing); lerr == nil {
 		if realExisting, err := filepath.EvalSymlinks(existing); err == nil {
+			rem, remErr := filepath.Rel(existing, abs)
+			if remErr != nil {
+				return "", remErr
+			}
+			realRel, relErr := filepath.Rel(realWork, filepath.Join(realExisting, rem))
+			if relErr != nil {
+				return "", relErr
+			}
+			if err := rejectReservedDestination(realRel); err != nil {
+				return "", err
+			}
 			if rrel, rerr := filepath.Rel(realWork, realExisting); rerr != nil || rrel == ".." || strings.HasPrefix(rrel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rrel) {
 				if rrel != "." {
 					return "", fmt.Errorf("destination path %q must stay inside the workdir", configuredPath)
@@ -103,6 +117,14 @@ func resolveDestPath(workDir, configuredPath string) (string, error) {
 		}
 	}
 	return abs, nil
+}
+
+func rejectReservedDestination(rel string) error {
+	p := filepath.ToSlash(filepath.Clean(rel))
+	if p == "." || p == ".tidy" || strings.HasPrefix(p, ".tidy/") || p == ".git" || strings.HasPrefix(p, ".git/") {
+		return fmt.Errorf("destination must not target the workdir or its .tidy/.git internals")
+	}
+	return nil
 }
 
 // SyncFile synchronizes a large file or world asset to the target destination.
@@ -222,20 +244,9 @@ func (m *Manager) SyncFileWithState(ctx context.Context, name string, fCfg confi
 			return nil, fmt.Errorf("failed extracting archive for %s into %s: %w", name, destPath, extErr)
 		}
 
-		// Replace any existing destination only after a successful extract.
-		if _, serr := os.Lstat(destPath); serr == nil {
-			if rerr := os.RemoveAll(destPath); rerr != nil {
-				_ = os.RemoveAll(staging)
-				return nil, fmt.Errorf("failed removing existing destination for %s at %s: %w", name, destPath, rerr)
-			}
-		}
-		if merr := os.MkdirAll(filepath.Dir(destPath), 0755); merr != nil {
+		if err := promoteStagedDirectory(staging, destPath); err != nil {
 			_ = os.RemoveAll(staging)
-			return nil, fmt.Errorf("failed creating parent for %s at %s: %w", name, destPath, merr)
-		}
-		if rerr := os.Rename(staging, destPath); rerr != nil {
-			_ = os.RemoveAll(staging)
-			return nil, fmt.Errorf("failed promoting staged extraction for %s into %s: %w", name, destPath, rerr)
+			return nil, fmt.Errorf("failed promoting staged extraction for %s into %s: %w", name, destPath, err)
 		}
 
 		// Automatically remediate stale session.lock files in extracted world directories
