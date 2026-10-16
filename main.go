@@ -543,6 +543,12 @@ func main() {
 
 		// Check if plugin is already in state and unchanged
 		if previousState != nil {
+			// Ownership survives source changes so a successful migration can
+			// retire the previous managed artifact. Local uploads stay protected.
+			if oldP, exists := previousState.Plugins[pluginName]; exists {
+				cp := oldP
+				oldPlugin = &cp
+			}
 			if oldP, exists := previousState.Plugins[pluginName]; exists && strings.ToLower(strings.TrimSpace(oldP.Source)) == source {
 				cp := oldP
 				oldPlugin = &cp
@@ -654,7 +660,7 @@ func main() {
 					SHA256:          res.SHA256,
 				}
 				if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
-					safeRemoveOldFile(workDir, oldPlugin.Filename, res.FilePath, true)
+					retirePluginArtifact(workDir, oldPlugin, res.FilePath)
 				}
 				// The jar is swapped but the plugin's on-disk configs/data are
 				// left untouched, so a breaking update can load stale files.
@@ -725,7 +731,7 @@ func main() {
 				SHA256:   res.SHA256,
 			}
 			if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
-				safeRemoveOldFile(workDir, oldPlugin.Filename, res.FilePath, true)
+				retirePluginArtifact(workDir, oldPlugin, res.FilePath)
 			}
 		case "github":
 			storeGitHub := func(res *resolver.PluginDownloadResult) {
@@ -743,7 +749,7 @@ func main() {
 					SHA256:          res.SHA256,
 				}
 				if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
-					safeRemoveOldFile(workDir, oldPlugin.Filename, res.FilePath, true)
+					retirePluginArtifact(workDir, oldPlugin, res.FilePath)
 				}
 				// The jar is swapped but the plugin's on-disk configs/data are
 				// left untouched, so a breaking update can load stale files.
@@ -812,15 +818,16 @@ func main() {
 				Hash:     res.Hash,
 				SHA256:   res.SHA256,
 			}
+			retirePluginArtifact(workDir, oldPlugin, res.FilePath)
 			// Local jars are manually uploaded: never auto-delete the old
-				// path on renames. Step 4A already keeps them; deleting here
-				// would permanently brick source="local" plugins.
-				if oldPlugin != nil && strings.ToLower(strings.TrimSpace(oldPlugin.Source)) == "local" {
-					if oldAbs, _, err := resolver.ResolveLocalPath(config.PluginConfig{Path: strings.TrimSpace(oldPlugin.Path)}, workDir); err == nil && oldAbs != res.FilePath {
-						if _, statErr := os.Stat(oldAbs); statErr == nil {
-							fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: previous local file kept at %s (manual cleanup if unneeded)", pluginName, oldPlugin.Path)))
-						}
+			// path on renames. Step 4A already keeps them; deleting here
+			// would permanently brick source="local" plugins.
+			if oldPlugin != nil && strings.ToLower(strings.TrimSpace(oldPlugin.Source)) == "local" {
+				if oldAbs, _, err := resolver.ResolveLocalPath(config.PluginConfig{Path: strings.TrimSpace(oldPlugin.Path)}, workDir); err == nil && oldAbs != res.FilePath {
+					if _, statErr := os.Stat(oldAbs); statErr == nil {
+						fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: previous local file kept at %s (manual cleanup if unneeded)", pluginName, oldPlugin.Path)))
 					}
+				}
 			}
 		default:
 			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: plugin %q has unsupported source %q (supported: 'modrinth', 'url', 'github', 'local')", pluginName, pCfg.Source)))
