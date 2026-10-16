@@ -196,7 +196,9 @@ func reportDrift(ctx context.Context, gitClient *git.Client, workDir, configFlag
 		// substitution to the HEAD blob in memory and compare against the
 		// working file. Pure templating differences are expected-dirty;
 		// real user edits are reported with secrets masked.
-		if templated[p] || previousState == nil {
+		// Inspect HEAD regardless of saved state: interrupted or skipped
+		// templating runs must not disable secret protection.
+		{
 			masked, isOnlyTemplate := maskedTemplatedDiff(ctx, gitClient, workDir, p, d)
 			if isOnlyTemplate {
 				churnSkipped++
@@ -255,8 +257,8 @@ func reportDrift(ctx context.Context, gitClient *git.Client, workDir, configFlag
 func maskedTemplatedDiff(ctx context.Context, gitClient *git.Client, workDir, relPath, rawDiff string) (string, bool) {
 	head, err := gitClient.ShowHeadFile(ctx, workDir, relPath)
 	if err != nil || head == "" {
-		// Cannot mask without HEAD: keep raw diff (caller reports it).
-		return "", false
+		// Fail closed: the old rendered values cannot be reconstructed safely.
+		return "(diff omitted: template safety could not be verified)\n", false
 	}
 	if !strings.Contains(head, "{{") {
 		return "", false
@@ -275,7 +277,10 @@ func maskedTemplatedDiff(ctx context.Context, gitClient *git.Client, workDir, re
 	if templateShapeMatches(head, string(workBytes)) {
 		return "", true
 	}
-	return maskValuesInText(rawDiff, placeholdersIn(head)), false
+	// The working file may contain values from a previous environment, and
+	// values can span lines. Never persist its raw diff: current env values
+	// cannot reliably identify every historical secret.
+	return "(diff omitted: templated file may contain historical secrets)\n", false
 }
 
 // maskSecretsInDiff masks secret values in a diff for files whose HEAD
@@ -287,7 +292,7 @@ func maskSecretsInDiff(ctx context.Context, gitClient *git.Client, workDir, relP
 	if err != nil || head == "" || !strings.Contains(head, "{{") {
 		return "", false
 	}
-	return maskValuesInText(rawDiff, placeholdersIn(head)), true
+	return "(diff omitted: templated file may contain historical secrets)\n", true
 }
 
 // placeholdersIn returns distinct {{VAR}} names found in content.
@@ -425,7 +430,7 @@ func formatDriftReport(modified, untracked []string, diffs map[string]string, ch
 	b.WriteString("# Written before the git sync.\n")
 	b.WriteString("# 'Discarded' files are tracked and were reset (reset --hard): commit them to keep them.\n")
 	b.WriteString("# 'Kept' files are untracked: git left them alone, but the remote does not know them.\n")
-	b.WriteString("# Files templated ({{VAR}}) show masked diffs (secrets as {{VAR}}); pure templating is filtered.\n")
+	b.WriteString("# Templated file diffs are omitted to protect historical secrets; pure templating is filtered.\n")
 	b.WriteString("# Diffs below are what the sync discarded (unified diff vs HEAD).\n")
 	if churnSkipped > 0 {
 		fmt.Fprintf(&b, "# %d file(s) differed only by volatile date comments (e.g. the server.properties header) and were ignored.\n", churnSkipped)
@@ -508,7 +513,7 @@ func writeDriftReport(workDir, reportName string, now time.Time, modified, untra
 		return
 	}
 	content := formatDriftReport(modified, untracked, diffs, churnSkipped, now)
-	_ = os.WriteFile(filepath.Join(workDir, reportName), []byte(content), 0644)
+	_ = os.WriteFile(filepath.Join(workDir, reportName), []byte(content), 0600)
 	pruneOldFiles(filepath.Join(workDir, driftReportDir), "drift-", ".txt", maxRetainedDriftReports)
 }
 
