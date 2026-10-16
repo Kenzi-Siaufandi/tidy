@@ -474,6 +474,18 @@ func main() {
 
 	// 4. Reconcile Plugins (Added, Updated, Removed, Unchanged with SHA-256)
 	installedPlugins := make(map[string]state.PluginState)
+	// Persist each successful install before proceeding to another artifact.
+	// Keep unprocessed ownership records so a failed run remains recoverable.
+	checkpoint := newPluginCheckpoint(previousState, state.ServerState{
+		Project: cfg.Server.Project, Version: cfg.Server.Version,
+		BuildID: activeServerBuildID, Filename: activeServerFilename, SHA256: activeServerSHA256,
+	}, currentCommit)
+	checkpointPlugin := func(name string, plugin state.PluginState) {
+		if err := checkpoint(workDir, name, plugin); err != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", ui.Red(fmt.Sprintf("[!] Fatal: Failed to checkpoint plugin %q: %v", name, err)))
+			exitWithLog(1)
+		}
+	}
 	modClient := resolver.NewModrinthClient("", "", nil)
 	// GitHub release downloads reuse the same PAT as git sync
 	// GitHub downloads reuse the git PAT from env.
@@ -659,6 +671,7 @@ func main() {
 					Hash:            res.Hash,
 					SHA256:          res.SHA256,
 				}
+				checkpointPlugin(pluginName, installedPlugins[pluginName])
 				if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
 					retirePluginArtifact(workDir, oldPlugin, res.FilePath)
 				}
@@ -730,6 +743,7 @@ func main() {
 				Hash:     res.Hash,
 				SHA256:   res.SHA256,
 			}
+			checkpointPlugin(pluginName, installedPlugins[pluginName])
 			if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
 				retirePluginArtifact(workDir, oldPlugin, res.FilePath)
 			}
@@ -748,6 +762,7 @@ func main() {
 					Hash:            res.Hash,
 					SHA256:          res.SHA256,
 				}
+				checkpointPlugin(pluginName, installedPlugins[pluginName])
 				if oldPlugin != nil && oldPlugin.Filename != "" && oldPlugin.Filename != res.Filename {
 					retirePluginArtifact(workDir, oldPlugin, res.FilePath)
 				}
@@ -818,6 +833,7 @@ func main() {
 				Hash:     res.Hash,
 				SHA256:   res.SHA256,
 			}
+			checkpointPlugin(pluginName, installedPlugins[pluginName])
 			retirePluginArtifact(workDir, oldPlugin, res.FilePath)
 			// Local jars are manually uploaded: never auto-delete the old
 			// path on renames. Step 4A already keeps them; deleting here
