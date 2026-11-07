@@ -14,6 +14,17 @@ func newPluginCheckpoint(previous *state.State, server state.ServerState, commit
 	pending := state.State{InstalledAt: time.Now().UTC()}
 	if previous != nil {
 		pending = *previous
+		// Deep-copy shared maps/slices: checkpoint mutates Plugins, but a
+		// future mutation of Files/TemplatedFiles must not corrupt previous.
+		if previous.Files != nil {
+			pending.Files = make(map[string]state.FileState, len(previous.Files))
+			for k, v := range previous.Files {
+				pending.Files[k] = v
+			}
+		}
+		if previous.TemplatedFiles != nil {
+			pending.TemplatedFiles = append([]string(nil), previous.TemplatedFiles...)
+		}
 	}
 	pending.Plugins = make(map[string]state.PluginState)
 	if previous != nil {

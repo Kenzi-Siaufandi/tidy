@@ -201,7 +201,7 @@ func splitRepo(repo string) (owner, name string, err error) {
 	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
 		return "", "", fmt.Errorf("expected \"owner/repo\", got %q", repo)
 	}
-	return parts[0], parts[1], nil
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), nil
 }
 
 // selectAsset picks the release asset with the exact configured filename.
@@ -270,6 +270,9 @@ func (c *GitHubClient) Resolve(ctx context.Context, pCfg config.PluginConfig) (*
 // Download fetches the already-resolved asset, verifies its mandatory
 // SHA-256 pin, and records resolved release metadata in the result.
 func (c *GitHubClient) Download(ctx context.Context, pluginName string, pCfg config.PluginConfig, workDir string, rel *GitHubRelease, file *GitHubAsset) (*PluginDownloadResult, error) {
+	if rel == nil || file == nil {
+		return nil, fmt.Errorf("plugin %q: github release/asset is not resolved", pluginName)
+	}
 	expectedSHA256 := strings.TrimSpace(pCfg.SHA256)
 	if expectedSHA256 == "" {
 		return nil, fmt.Errorf("plugin %q: github source requires 'sha256' checksum", pluginName)
@@ -294,14 +297,23 @@ func (c *GitHubClient) Download(ctx context.Context, pluginName string, pCfg con
 
 	// Use a long-timeout client for the (large) jar download; the API client
 	// default of 30s is too short for slow networks. Preserve the redirect
-	// guard that strips Authorization on host change.
+	// guard that strips Authorization on host change, plus any caller
+	// Transport/Jar, by copying rather than replacing the client.
 	downloadClient := c.HTTPClient
-	if downloadClient == nil || downloadClient.Timeout < 5*time.Minute {
+	if downloadClient == nil {
 		downloadClient = &http.Client{Timeout: 5 * time.Minute, CheckRedirect: stripAuthOnRedirect}
-	} else if downloadClient.CheckRedirect == nil {
-		cp := *downloadClient
-		cp.CheckRedirect = stripAuthOnRedirect
-		downloadClient = &cp
+	} else {
+		needsCopy := downloadClient.Timeout < 5*time.Minute || downloadClient.CheckRedirect == nil
+		if needsCopy {
+			cp := *downloadClient
+			if cp.Timeout < 5*time.Minute {
+				cp.Timeout = 5 * time.Minute
+			}
+			if cp.CheckRedirect == nil {
+				cp.CheckRedirect = stripAuthOnRedirect
+			}
+			downloadClient = &cp
+		}
 	}
 
 	res, err := DownloadAndVerify(ctx, DownloadOptions{

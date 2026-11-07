@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -53,10 +54,11 @@ func NewClient() (*Client, error) {
 }
 
 // IsGitRepo checks if the specified directory is already a git repository.
+// Worktree/submodule checkouts keep .git as a file, not a directory.
 func (c *Client) IsGitRepo(dir string) bool {
 	gitDir := filepath.Join(dir, ".git")
-	info, err := os.Stat(gitDir)
-	return err == nil && info.IsDir()
+	_, err := os.Stat(gitDir)
+	return err == nil
 }
 
 // BuildAuthURL constructs an authenticated HTTPS URL if a token is provided.
@@ -88,11 +90,13 @@ func BuildAuthURL(rawURL, username, token string) (string, error) {
 	return u.String(), nil
 }
 
-// MaskURL masks sensitive credentials in a URL for safe logging.
+// MaskURL masks sensitive credentials in a URL for safe logging. URLs that
+// fail to parse (e.g. tokens with bad %-escapes or spaces) fall back to
+// regex redaction so credentials never leak into logs.
 func MaskURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.User == nil {
-		return rawURL
+		return redactURLFallback(rawURL, true)
 	}
 	_, hasPassword := u.User.Password()
 	if hasPassword {
@@ -101,6 +105,42 @@ func MaskURL(rawURL string) string {
 		u.User = url.User("redacted")
 	}
 	return u.String()
+}
+
+// redactURLFallback masks userinfo in URLs that url.Parse rejects. It
+// rewrites "scheme://userinfo@host" to "scheme://redacted@host" (mask) or
+// "scheme://host" (strip) without parsing the full URL. URLs without a
+// scheme or "@" are returned unchanged.
+func redactURLFallback(rawURL string, mask bool) string {
+	idx := strings.Index(rawURL, "://")
+	if idx < 0 {
+		return rawURL
+	}
+	rest := rawURL[idx+3:]
+	at := strings.Index(rest, "@")
+	if at < 0 {
+		return rawURL
+	}
+	// Userinfo must precede the first "/" (path) and be non-empty.
+	if slash := strings.Index(rest, "/"); slash >= 0 && at > slash {
+		return rawURL
+	}
+	if at == 0 {
+		return rawURL
+	}
+	if mask {
+		return rawURL[:idx+3] + "redacted@" + rest[at+1:]
+	}
+	return rawURL[:idx+3] + rest[at+1:]
+}
+
+// validateGitArg rejects values that git would parse as an option (leading
+// "-"), e.g. branch "--upload-pack=<cmd>" executed via `git fetch`.
+func validateGitArg(name, value string) error {
+	if strings.HasPrefix(strings.TrimSpace(value), "-") {
+		return fmt.Errorf("invalid git %s %q: values starting with \"-\" are not allowed", name, value)
+	}
+	return nil
 }
 
 // ShortSHA returns the first 7 characters of a commit SHA, or a safe
@@ -197,7 +237,9 @@ func stripURLCredentials(rawURL string) string {
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil || u.User == nil {
-		return rawURL
+		// Parse failures (bad %-escapes, spaces in credentials) must not
+		// leak the raw URL to argv/.git/config/logs: strip via regex.
+		return redactURLFallback(rawURL, false)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return rawURL
@@ -266,7 +308,7 @@ func (c *Client) IsTrackedDirty(ctx context.Context, dir, relPath string) (bool,
 	if relPath == "" {
 		return false, fmt.Errorf("file path cannot be empty")
 	}
-	cmd := exec.CommandContext(ctx, c.GitPath, "status", "--porcelain", "--", relPath)
+	cmd := exec.CommandContext(ctx, c.GitPath, "status", "--porcelain", "--", ":(literal)"+relPath)
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -299,6 +341,33 @@ func (c *Client) StatusDrift(ctx context.Context, dir string) (*DriftStatus, err
 	return parsePorcelainDrift(string(out)), nil
 }
 
+// maxGitBlobBytes caps git diff/show output so a huge tracked blob cannot
+// OOM the boot sequence. Drift callers treat over-cap output as omitted.
+const maxGitBlobBytes = 2 * 1024 * 1024
+
+// runLimitedOutput runs cmd and captures at most maxGitBlobBytes+1 bytes,
+// enforcing the cap without buffering an unbounded blob.
+func runLimitedOutput(cmd *exec.Cmd) ([]byte, error) {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	out, _ := io.ReadAll(io.LimitReader(stdout, maxGitBlobBytes+1))
+	runErr := cmd.Wait()
+	if runErr != nil {
+		return nil, runErr
+	}
+	if len(out) > maxGitBlobBytes {
+		return nil, fmt.Errorf("output exceeds %d bytes", maxGitBlobBytes)
+	}
+	return out, nil
+}
+
 // DiffTracked returns the unified diff of a tracked file versus HEAD.
 // It is the troubleshooting payload for drift reports: the exact lines the
 // next sync will discard. Empty output means no textual difference (e.g. a
@@ -309,9 +378,9 @@ func (c *Client) DiffTracked(ctx context.Context, dir, relPath string) (string, 
 	if relPath == "" {
 		return "", fmt.Errorf("file path cannot be empty")
 	}
-	cmd := exec.CommandContext(ctx, c.GitPath, "diff", "--no-color", "--no-ext-diff", "HEAD", "--", relPath)
+	cmd := exec.CommandContext(ctx, c.GitPath, "diff", "--no-color", "--no-ext-diff", "HEAD", "--", ":(literal)"+relPath)
 	cmd.Dir = dir
-	out, err := cmd.Output()
+	out, err := runLimitedOutput(cmd)
 	if err != nil {
 		return "", fmt.Errorf("git diff failed in %s: %w", dir, err)
 	}
@@ -331,7 +400,7 @@ func (c *Client) ShowHeadFile(ctx context.Context, dir, relPath string) (string,
 	}
 	cmd := exec.CommandContext(ctx, c.GitPath, "show", "HEAD:"+relPath)
 	cmd.Dir = dir
-	out, err := cmd.Output()
+	out, err := runLimitedOutput(cmd)
 	if err != nil {
 		return "", fmt.Errorf("git show failed in %s: %w", dir, err)
 	}
@@ -344,7 +413,10 @@ func (c *Client) ShowHeadFile(ctx context.Context, dir, relPath string) (string,
 // parsePorcelainDrift splits porcelain status output into tracked
 // modifications versus untracked files. Ignored ("!!") entries are skipped.
 // Rename entries ("R  old -> new") resolve to the new path; quoted paths
-// (core.quotePath) are unquoted when possible.
+// (core.quotePath) are unquoted when possible. The rename split happens
+// before unquoting: git renders spaced renames as
+// `R  "old file.txt" -> "new file.txt"`, where whole-string Unquote/Trim
+// mangles the paths into garbage ("/->" splits inside quotes, stray quotes).
 func parsePorcelainDrift(out string) *DriftStatus {
 	st := &DriftStatus{}
 	for _, line := range strings.Split(out, "\n") {
@@ -360,9 +432,40 @@ func parsePorcelainDrift(out string) *DriftStatus {
 		case strings.HasPrefix(line, "!!"):
 			continue
 		default:
-			path := cleanPorcelainPath(strings.TrimSpace(line[3:]))
-			if idx := strings.Index(path, " -> "); idx >= 0 {
-				path = path[idx+4:]
+			rest := strings.TrimSpace(line[3:])
+			path := rest
+			// Split rename on the separator outside quotes. Git quotes
+			// each side independently when either contains a space.
+			if strings.HasPrefix(rest, "\"") && strings.HasSuffix(rest, "\"") {
+				// A single quoted path (possibly containing " -> " as
+				// part of its name) unquotes as one string; a rename
+				// `"old" -> "new"` does not (interior quotes).
+				if unquoted, err := strconv.Unquote(rest); err == nil {
+					path = filepath.ToSlash(unquoted)
+				} else if sep := strings.Index(rest, "\" -> \""); sep >= 0 {
+					path = rest[sep+len("\" -> \""):]
+					path = strings.TrimSuffix(path, "\"")
+					path = cleanPorcelainPath(path)
+				} else if idx := strings.Index(rest, " -> "); idx >= 0 {
+					path = cleanPorcelainPath(rest[idx+4:])
+				}
+			} else if strings.HasPrefix(rest, "\"") {
+				if sep := strings.Index(rest, "\" -> \""); sep >= 0 {
+					path = rest[sep+len("\" -> \""):]
+					// Trim the single trailing quote of the new path.
+					path = strings.TrimSuffix(path, "\"")
+				} else if idx := strings.Index(rest, " -> "); idx >= 0 {
+					// Mixed quoting (uncommon): split on the separator,
+					// then unquote the new side below.
+					path = rest[idx+4:]
+				}
+				path = cleanPorcelainPath(path)
+			} else {
+				if idx := strings.Index(rest, " -> "); idx >= 0 {
+					path = cleanPorcelainPath(rest[idx+4:])
+				} else {
+					path = cleanPorcelainPath(path)
+				}
 			}
 			if path != "" {
 				st.Modified = append(st.Modified, path)
@@ -470,6 +573,15 @@ func isDirEmpty(dir string) bool {
 // It initializes a git repository in place, fetches the target branch, and force checks out the tree.
 // Credentials are supplied via GIT_ASKPASS; the stored remote URL never contains the token.
 func (c *Client) cloneInPlace(ctx context.Context, opts Options) error {
+	if err := validateGitArg("repository URL", opts.RepoURL); err != nil {
+		return err
+	}
+	if opts.Branch == "" {
+		opts.Branch = "main"
+	}
+	if err := validateGitArg("branch", opts.Branch); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(opts.TargetDir, 0755); err != nil {
 		return fmt.Errorf("failed to create target directory %s: %w", opts.TargetDir, err)
 	}
@@ -485,12 +597,12 @@ func (c *Client) cloneInPlace(ctx context.Context, opts Options) error {
 
 	// 2. git remote add or set-url (always plain URL, no token)
 	plainURL := stripURLCredentials(opts.RepoURL)
-	remoteCmd := exec.CommandContext(ctx, c.GitPath, "remote", "add", "origin", plainURL)
+	remoteCmd := exec.CommandContext(ctx, c.GitPath, "remote", "add", "--", "origin", plainURL)
 	remoteCmd.Dir = opts.TargetDir
 	stderr.Reset()
 	remoteCmd.Stderr = &stderr
 	if err := remoteCmd.Run(); err != nil {
-		setUrlCmd := exec.CommandContext(ctx, c.GitPath, "remote", "set-url", "origin", plainURL)
+		setUrlCmd := exec.CommandContext(ctx, c.GitPath, "remote", "set-url", "--", "origin", plainURL)
 		setUrlCmd.Dir = opts.TargetDir
 		stderr.Reset()
 		setUrlCmd.Stderr = &stderr
@@ -499,8 +611,10 @@ func (c *Client) cloneInPlace(ctx context.Context, opts Options) error {
 		}
 	}
 
-	// 3. git fetch --depth 1 origin <branch> (ASKPASS supplies token)
-	fetchCmd, cleanup, err := c.gitCmd(ctx, opts.TargetDir, opts, "fetch", "--depth", "1", "origin", opts.Branch)
+	// 3. git fetch --depth 1 origin <branch> (ASKPASS supplies token).
+	// The branch is a positional refspec: guard it with "--" so a value
+	// like "--upload-pack=<cmd>" is treated as a ref, never an option.
+	fetchCmd, cleanup, err := c.gitCmd(ctx, opts.TargetDir, opts, "fetch", "--depth", "1", "origin", "--", opts.Branch)
 	if err != nil {
 		return err
 	}
@@ -539,6 +653,16 @@ func (c *Client) Clone(ctx context.Context, opts Options) error {
 	if opts.TargetDir == "" {
 		opts.TargetDir = "."
 	}
+	if err := validateGitArg("repository URL", opts.RepoURL); err != nil {
+		return err
+	}
+	if err := validateGitArg("branch", opts.Branch); err != nil {
+		return err
+	}
+	// TargetDir is the final clone positional; a leading "-" would be an option.
+	if err := validateGitArg("target directory", opts.TargetDir); err != nil {
+		return err
+	}
 
 	// If the target directory already exists and contains files (e.g. /home/container in Pterodactyl),
 	// standard git clone will fail. Use cloneInPlace to initialize and checkout cleanly.
@@ -550,6 +674,7 @@ func (c *Client) Clone(ctx context.Context, opts Options) error {
 		"clone",
 		"--depth", "1",
 		"--branch", opts.Branch,
+		"--",
 		stripURLCredentials(opts.RepoURL),
 		opts.TargetDir,
 	}
@@ -591,10 +716,13 @@ func (c *Client) Pull(ctx context.Context, opts Options) (*PullResult, error) {
 	if branch == "" {
 		branch = "main"
 	}
-
-	// 1. Reset local template modifications to ensure clean merge
-	if err := c.ResetWorkingTree(ctx, opts.TargetDir); err != nil {
-		return nil, fmt.Errorf("failed to clean working tree before pull: %w", err)
+	if err := validateGitArg("branch", branch); err != nil {
+		return nil, err
+	}
+	if opts.RepoURL != "" {
+		if err := validateGitArg("repository URL", opts.RepoURL); err != nil {
+			return nil, err
+		}
 	}
 
 	oldCommit, err := c.GetHeadCommit(ctx, opts.TargetDir)
@@ -602,16 +730,18 @@ func (c *Client) Pull(ctx context.Context, opts Options) (*PullResult, error) {
 		return nil, err
 	}
 
-	// 2. Fetch updates via the stored origin remote (ASKPASS supplies the
+	// Fetch updates via the stored origin remote (ASKPASS supplies the
 	// token; the remote URL stays clean). Never pass RepoURL on argv: it
 	// would expose the URL in /proc/<pid>/cmdline and risk persisting
 	// embedded credentials. Best-effort: scrub a legacy dirty origin URL.
+	// Fetch BEFORE resetting the working tree: a failed fetch (expired
+	// token, missing branch, network) must not discard local edits.
 	if plain := stripURLCredentials(opts.RepoURL); plain != "" {
-		scrubCmd := exec.CommandContext(ctx, c.GitPath, "remote", "set-url", "origin", plain)
+		scrubCmd := exec.CommandContext(ctx, c.GitPath, "remote", "set-url", "--", "origin", plain)
 		scrubCmd.Dir = opts.TargetDir
 		_ = scrubCmd.Run()
 	}
-	fetchArgs := []string{"fetch", "--depth", "10", "origin", branch}
+	fetchArgs := []string{"fetch", "--depth", "10", "origin", "--", branch}
 
 	fetchCmd, cleanup, err := c.gitCmd(ctx, opts.TargetDir, opts, fetchArgs...)
 	if err != nil {
@@ -632,6 +762,12 @@ func (c *Client) Pull(ctx context.Context, opts Options) (*PullResult, error) {
 		return nil, fmt.Errorf("failed to get FETCH_HEAD commit: %w", err)
 	}
 	newCommit := strings.TrimSpace(string(revOut))
+
+	// Discard local template modifications only after a successful fetch,
+	// so a fetch failure leaves the working tree intact for investigation.
+	if err := c.ResetWorkingTree(ctx, opts.TargetDir); err != nil {
+		return nil, fmt.Errorf("failed to clean working tree before pull: %w", err)
+	}
 
 	if oldCommit == newCommit {
 		return &PullResult{

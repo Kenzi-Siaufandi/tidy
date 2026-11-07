@@ -26,6 +26,16 @@ import (
 
 const Version = version.Version
 
+// shortSHA returns the first 12 chars of a hex digest (no ellipsis).
+// Resolvers always return 64-char hashes on success, but a defensive
+// prefix guards against panics on unexpected empty/short values.
+func shortSHA(s string) string {
+	if len(s) <= 12 {
+		return s
+	}
+	return s[:12]
+}
+
 // driftReportDir holds the panel-viewable drift reports: one file per drift
 // event (clean runs write nothing), never pruned, so old reports remain as
 // history without cluttering .tidy itself.
@@ -446,7 +456,7 @@ func main() {
 			exitWithLog(1)
 		}
 		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Server: Downloaded %s (Build #%d, SHA256: %s, %d bytes)",
-			serverRes.Filename, serverRes.BuildID, serverRes.SHA256[:12]+"...", serverRes.Size)))
+			serverRes.Filename, serverRes.BuildID, shortSHA(serverRes.SHA256)+"...", serverRes.Size)))
 		activeServerFilename = serverRes.Filename
 		activeServerSHA256 = serverRes.SHA256
 		activeServerBuildID = serverRes.BuildID
@@ -466,10 +476,18 @@ func main() {
 
 	// Keep the panel's {{SERVER_JARFILE}} stable across Paper upgrades.
 	jarAlias := jarlink.AliasFromEnv(os.Getenv)
+	jarLinkFailed := false
 	if linked, linkErr := jarlink.Sync(workDir, activeServerFilename, jarAlias); linkErr != nil {
+		jarLinkFailed = true
 		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Warning: failed to link %s -> %s: %v", jarAlias, activeServerFilename, linkErr)))
 	} else if linked != "" {
 		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Server: Linked %s -> %s", linked, activeServerFilename)))
+	} else if activeServerFilename != "" && !strings.EqualFold(activeServerFilename, jarAlias) {
+		// Sync returned no link (e.g. alias already correct) but the jar
+		// must exist for the ready banner to be true.
+		if _, err := os.Stat(filepath.Join(workDir, jarAlias)); err != nil {
+			jarLinkFailed = true
+		}
 	}
 
 	// 4. Reconcile Plugins (Added, Updated, Removed, Unchanged with SHA-256)
@@ -711,7 +729,7 @@ func main() {
 					exitWithLog(1)
 				}
 				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (%s, SHA256: %s, %d bytes)",
-					pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
+					pluginName, res.Filename, res.VersionNumber, shortSHA(res.SHA256)+"...", res.Size)))
 				storeModrinth(res)
 				continue
 			}
@@ -722,7 +740,7 @@ func main() {
 				exitWithLog(1)
 			}
 			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (%s, SHA256: %s, %d bytes)",
-				pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
+				pluginName, res.Filename, res.VersionNumber, shortSHA(res.SHA256)+"...", res.Size)))
 
 			storeModrinth(res)
 
@@ -733,7 +751,7 @@ func main() {
 				exitWithLog(1)
 			}
 			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (SHA256: %s, %d bytes)",
-				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)))
+				pluginName, res.Filename, shortSHA(res.SHA256)+"...", res.Size)))
 
 			installedPlugins[pluginName] = state.PluginState{
 				Source:   "url",
@@ -802,7 +820,7 @@ func main() {
 					exitWithLog(1)
 				}
 				fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (%s, SHA256: %s, %d bytes)",
-					pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
+					pluginName, res.Filename, res.VersionNumber, shortSHA(res.SHA256)+"...", res.Size)))
 				storeGitHub(res)
 				continue
 			}
@@ -813,7 +831,7 @@ func main() {
 				exitWithLog(1)
 			}
 			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Downloaded %s (%s, SHA256: %s, %d bytes)",
-				pluginName, res.Filename, res.VersionNumber, res.SHA256[:12]+"...", res.Size)))
+				pluginName, res.Filename, res.VersionNumber, shortSHA(res.SHA256)+"...", res.Size)))
 
 			storeGitHub(res)
 		case "local":
@@ -823,7 +841,7 @@ func main() {
 				exitWithLog(1)
 			}
 			fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[+] Plugin [%s]: Verified local %s (SHA256: %s, %d bytes, no download)",
-				pluginName, res.Filename, res.SHA256[:12]+"...", res.Size)))
+				pluginName, res.Filename, shortSHA(res.SHA256)+"...", res.Size)))
 
 			installedPlugins[pluginName] = state.PluginState{
 				Source:   "local",
@@ -900,7 +918,13 @@ func main() {
 	// 6. Template Variable Replacement (Mustache {{VAR_NAME}})
 	// This run's substituted files are recorded in state so the next boot's
 	// drift report can tell expected templating apart from external edits.
-	var templatedFiles []string
+	// When templating is skipped/disabled or errors, the previous set is
+	// retained: overwriting it with nil would erase the expected-dirty
+	// history the next drift report relies on.
+	templatedFiles := []string{}
+	if previousState != nil && len(previousState.TemplatedFiles) > 0 {
+		templatedFiles = append([]string(nil), previousState.TemplatedFiles...)
+	}
 	if !*skipTplFlag && !cfg.Templates.Disabled {
 		fmt.Println(ui.Cyan("[*] Templates: Scanning config files for {{VAR_NAME}} variable replacements..."))
 		tplResult, err := templating.ProcessDirectory(workDir, cfg.Templates.Paths)
@@ -909,6 +933,7 @@ func main() {
 		} else {
 			fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Templates: Processed %d configs with %d variable replacements across %d modified files",
 				tplResult.FilesProcessed, tplResult.Replacements, len(tplResult.ModifiedFiles))))
+			templatedFiles = []string{}
 			for _, p := range tplResult.ModifiedFiles {
 				templatedFiles = append(templatedFiles, filepath.ToSlash(p))
 			}
@@ -947,8 +972,13 @@ func main() {
 	}
 
 	fmt.Println(ui.Bold("=================================================================="))
-	fmt.Println(ui.Green("  [✓] Pre-flight orchestration completed successfully!"))
-	fmt.Printf("  Container is ready for Java 25 startup: java -jar %s\n", jarlink.AliasFromEnv(os.Getenv))
+	if jarLinkFailed {
+		fmt.Println(ui.Red("  [!] Pre-flight finished, but the server jar link is missing."))
+		fmt.Printf("  Java will NOT start: no jar at %s -> %s. Resolve the link error above.\n", jarAlias, activeServerFilename)
+	} else {
+		fmt.Println(ui.Green("  [✓] Pre-flight orchestration completed successfully!"))
+		fmt.Printf("  Container is ready for Java 25 startup: java -jar %s\n", jarlink.AliasFromEnv(os.Getenv))
+	}
 	fmt.Println(ui.Bold("=================================================================="))
 	finishRunLog()
 }

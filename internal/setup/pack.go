@@ -21,6 +21,14 @@ import (
 var packStripDirs = []string{"playerdata", "stats", "advancements"}
 var packStripFiles = []string{"session.lock", "uid.dat"}
 
+// prefixSHA returns the first 12 chars of a hex digest safely.
+func prefixSHA(s string) string {
+	if len(s) <= 12 {
+		return s
+	}
+	return s[:12]
+}
+
 // PackOptions configures a world-template pack run.
 type PackOptions struct {
 	Root   string // server root containing the world dir
@@ -70,7 +78,9 @@ func normalizePackFormat(flagVal, output string) (format, ext string) {
 	}
 }
 
-// copyDir copies src tree into dst, preserving modes. Symlinks are skipped.
+// copyDir copies src tree into dst, preserving modes. Symlinks and other
+// non-regular files (FIFOs, devices, sockets) are skipped: opening a FIFO
+// would block forever.
 func copyDir(src, dst string) (files, skippedLinks int, err error) {
 	entries, err := os.ReadDir(src)
 	if err != nil {
@@ -97,6 +107,10 @@ func copyDir(src, dst string) (files, skippedLinks int, err error) {
 				return files, skippedLinks, err
 			}
 			_ = os.Chmod(d, info.Mode().Perm()&0777)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			skippedLinks++
 			continue
 		}
 		if err := copyFile(s, d, info.Mode().Perm()&0777); err != nil {
@@ -211,17 +225,14 @@ func writeTarGz(staging, dest string, rels []string, gzipOn bool) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 	var tw *tar.Writer
 	var gw *gzip.Writer
 	if gzipOn {
 		gw = gzip.NewWriter(out)
-		defer gw.Close()
 		tw = tar.NewWriter(gw)
 	} else {
 		tw = tar.NewWriter(out)
 	}
-	defer tw.Close()
 
 	seenDirs := map[string]bool{}
 	for _, rel := range rels {
@@ -236,7 +247,7 @@ func writeTarGz(staging, dest string, rels []string, gzipOn bool) error {
 				}
 				seenDirs[p] = true
 				if err := tw.WriteHeader(&tar.Header{Name: p + "/", Typeflag: tar.TypeDir, Mode: 0755}); err != nil {
-					return err
+					return closeArchive(dest, out, tw, gw, err)
 				}
 			}
 		}
@@ -250,20 +261,43 @@ func writeTarGz(staging, dest string, rels []string, gzipOn bool) error {
 			Mode: int64(info.Mode().Perm() & 0777),
 			Size: info.Size(),
 		}); err != nil {
-			return err
+			return closeArchive(dest, out, tw, gw, err)
 		}
 		f, err := os.Open(full)
 		if err != nil {
-			return err
+			return closeArchive(dest, out, tw, gw, err)
 		}
 		_, copyErr := io.Copy(tw, f)
 		closeErr := f.Close()
 		if copyErr != nil {
-			return copyErr
+			return closeArchive(dest, out, tw, gw, copyErr)
 		}
 		if closeErr != nil {
-			return closeErr
+			return closeArchive(dest, out, tw, gw, closeErr)
 		}
+	}
+	return closeArchive(dest, out, tw, gw, nil)
+}
+
+// closeArchive flushes the tar/gzip layers and the file, surfacing flush
+// errors (e.g. full disk) instead of silently reporting success for a
+// truncated archive. Caller-visible dest is removed on failure.
+func closeArchive(dest string, out *os.File, tw *tar.Writer, gw *gzip.Writer, prior error) error {
+	var firstErr error = prior
+	if err := tw.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if gw != nil {
+		if err := gw.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if err := out.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if firstErr != nil {
+		_ = os.Remove(dest)
+		return firstErr
 	}
 	return nil
 }
@@ -280,9 +314,7 @@ func writeZip(staging, dest string, rels []string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 	zw := zip.NewWriter(out)
-	defer zw.Close()
 
 	seenDirs := map[string]bool{}
 	for _, rel := range rels {
@@ -295,7 +327,7 @@ func writeZip(staging, dest string, rels []string) error {
 				}
 				seenDirs[p] = true
 				if _, err := zw.Create(p + "/"); err != nil {
-					return err
+					return closeZip(dest, out, zw, err)
 				}
 			}
 		}
@@ -308,20 +340,35 @@ func writeZip(staging, dest string, rels []string) error {
 		hdr.SetMode(info.Mode().Perm() & 0777)
 		w, err := zw.CreateHeader(hdr)
 		if err != nil {
-			return err
+			return closeZip(dest, out, zw, err)
 		}
 		f, err := os.Open(full)
 		if err != nil {
-			return err
+			return closeZip(dest, out, zw, err)
 		}
 		_, copyErr := io.Copy(w, f)
 		closeErr := f.Close()
 		if copyErr != nil {
-			return copyErr
+			return closeZip(dest, out, zw, copyErr)
 		}
 		if closeErr != nil {
-			return closeErr
+			return closeZip(dest, out, zw, closeErr)
 		}
+	}
+	return closeZip(dest, out, zw, nil)
+}
+
+func closeZip(dest string, out *os.File, zw *zip.Writer, prior error) error {
+	var firstErr error = prior
+	if err := zw.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := out.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if firstErr != nil {
+		_ = os.Remove(dest)
+		return firstErr
 	}
 	return nil
 }
@@ -333,7 +380,35 @@ func PackWorld(opts PackOptions) (*PackResult, error) {
 	if world == "" {
 		world = "world"
 	}
-	worldDir := filepath.Join(opts.Root, world)
+	// World must stay inside Root: reject absolute paths and "..".
+	if filepath.IsAbs(world) {
+		return nil, fmt.Errorf("world %q must be relative to the server root", world)
+	}
+	cleanWorld := filepath.Clean(world)
+	if cleanWorld == ".." || strings.HasPrefix(cleanWorld, ".."+string(filepath.Separator)) || cleanWorld == "." {
+		return nil, fmt.Errorf("world %q must not contain parent traversals (..)", world)
+	}
+	// Unknown explicit formats must fail loudly, not silently fall back.
+	if f := strings.ToLower(strings.TrimSpace(opts.Format)); f != "" {
+		switch f {
+		case "zip", "tar", "tgz", "tar.gz", "tar-gz":
+		default:
+			return nil, fmt.Errorf("unsupported pack format %q (supported: zip, tar, tar.gz)", opts.Format)
+		}
+	}
+	worldDir := filepath.Join(opts.Root, cleanWorld)
+	// Stay-inside check after Clean/Join.
+	rootAbs, err := filepath.Abs(opts.Root)
+	if err != nil {
+		return nil, err
+	}
+	worldAbs, err := filepath.Abs(worldDir)
+	if err != nil {
+		return nil, err
+	}
+	if rel, err := filepath.Rel(rootAbs, worldAbs); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("world %q escapes the server root", world)
+	}
 	if info, err := os.Stat(worldDir); err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("world directory %q not found", worldDir)
 	}
@@ -341,8 +416,11 @@ func PackWorld(opts PackOptions) (*PackResult, error) {
 	format, ext := normalizePackFormat(opts.Format, opts.Output)
 	output := strings.TrimSpace(opts.Output)
 	if output == "" {
-		cwd, _ := os.Getwd()
-		output = filepath.Join(cwd, world+"-template"+ext)
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine output directory: %w", err)
+		}
+		output = filepath.Join(cwd, cleanWorld+"-template"+ext)
 	}
 	absOut, err := filepath.Abs(output)
 	if err != nil {
@@ -425,7 +503,7 @@ func CmdPackWorld(root string, opts PackOptions) int {
 		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf("[!] Skipped %d symlinks (tidy cannot extract them).", res.SkippedLinks)))
 	}
 	fmt.Printf("%s\n", ui.Green(fmt.Sprintf("[+] Wrote %s (%d files, %s, SHA256: %s...)",
-		res.ArchivePath, res.Files, FormatSize(res.Size), res.SHA256[:12])))
+		res.ArchivePath, res.Files, FormatSize(res.Size), prefixSHA(res.SHA256))))
 	if res.Files > 10000 {
 		fmt.Printf("%s\n", ui.Yellow("[!] Archive exceeds tidy's 10k-file extract limit; prune the world or split it."))
 	}

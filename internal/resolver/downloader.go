@@ -12,6 +12,7 @@ import (
 	"hash"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -60,6 +61,16 @@ func DownloadAndVerify(ctx context.Context, opts DownloadOptions) (*DownloadResu
 	if opts.ExpectedHash == "" {
 		return nil, fmt.Errorf("expected hash cannot be empty")
 	}
+	// Only HTTP(S) downloads are allowed; reject file:/gopher:/etc. so
+	// API-supplied URLs cannot reach local files or internal services.
+	if parsed, pErr := url.Parse(strings.TrimSpace(opts.URL)); pErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, fmt.Errorf("download URL must use http or https scheme")
+	}
+	// Errors must never leak credentials embedded in opts.URL.
+	redacted := opts.URL
+	if parsed, pErr := url.Parse(strings.TrimSpace(opts.URL)); pErr == nil {
+		redacted = parsed.Redacted()
+	}
 
 	algo := strings.ToLower(strings.TrimSpace(opts.HashAlgorithm))
 	newHasher := func() (hash.Hash, error) {
@@ -97,10 +108,15 @@ func DownloadAndVerify(ctx context.Context, opts DownloadOptions) (*DownloadResu
 	label := strings.TrimSpace(opts.ProgressLabel)
 
 	// A partial tmp file means a previous run was interrupted (killed or
-	// timed out); try to continue it instead of starting over.
+	// timed out); try to continue it instead of starting over. Only a
+	// regular file qualifies: a symlink is removed, never followed.
 	var resumeOffset int64
-	if info, err := os.Stat(tmpPath); err == nil && info.Size() > 0 {
-		resumeOffset = info.Size()
+	if info, err := os.Lstat(tmpPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			_ = os.Remove(tmpPath)
+		} else if info.Mode().IsRegular() && info.Size() > 0 {
+			resumeOffset = info.Size()
+		}
 	}
 
 	// At most two attempts: the initial request, plus one clean restart if
@@ -120,13 +136,19 @@ func DownloadAndVerify(ctx context.Context, opts DownloadOptions) (*DownloadResu
 		if offset > 0 {
 			// Seed the hash with the already-downloaded prefix.
 			if !seedHasherWithFile(hasher, tmpPath) {
+				// The partial copy left stale bytes in the hasher:
+				// restart with a fresh hasher (mirrors the 200-branch).
 				offset = 0
+				hasher, err = newHasher()
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, opts.URL, nil)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create HTTP request for %s: %w", opts.URL, err)
+			return nil, fmt.Errorf("failed to create HTTP request for %s: %w", redacted, err)
 		}
 		for k, v := range opts.Headers {
 			req.Header.Set(k, v)
@@ -137,7 +159,7 @@ func DownloadAndVerify(ctx context.Context, opts DownloadOptions) (*DownloadResu
 
 		resp, err := client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("HTTP download request failed for %s: %w", opts.URL, err)
+			return nil, fmt.Errorf("HTTP download request failed for %s: %w", redacted, err)
 		}
 
 		appendMode := false
@@ -145,14 +167,14 @@ func DownloadAndVerify(ctx context.Context, opts DownloadOptions) (*DownloadResu
 		case http.StatusPartialContent:
 			if offset <= 0 {
 				resp.Body.Close()
-				return nil, fmt.Errorf("download failed for %s: unexpected HTTP 206 without a Range request", opts.URL)
+				return nil, fmt.Errorf("download failed for %s: unexpected HTTP 206 without a Range request", redacted)
 			}
 			if start, ok := parseRangeStart(resp.Header.Get("Content-Range")); !ok || start != offset {
 				resp.Body.Close()
 				if attempt == 0 {
 					continue // stale partial file; retry from scratch
 				}
-				return nil, fmt.Errorf("download failed for %s: server resumed from byte %d, requested %d", opts.URL, start, offset)
+				return nil, fmt.Errorf("download failed for %s: server resumed from byte %d, requested %d", redacted, start, offset)
 			}
 			appendMode = true
 		case http.StatusOK:
@@ -172,10 +194,10 @@ func DownloadAndVerify(ctx context.Context, opts DownloadOptions) (*DownloadResu
 			if attempt == 0 {
 				continue // stale partial file (e.g. newer remote); retry from scratch
 			}
-			return nil, fmt.Errorf("download failed for %s: HTTP %d %s", opts.URL, resp.StatusCode, resp.Status)
+			return nil, fmt.Errorf("download failed for %s: HTTP %d %s", redacted, resp.StatusCode, resp.Status)
 		default:
 			resp.Body.Close()
-			return nil, fmt.Errorf("download failed for %s: HTTP %d %s", opts.URL, resp.StatusCode, resp.Status)
+			return nil, fmt.Errorf("download failed for %s: HTTP %d %s", redacted, resp.StatusCode, resp.Status)
 		}
 
 		total := resp.ContentLength
@@ -184,6 +206,18 @@ func DownloadAndVerify(ctx context.Context, opts DownloadOptions) (*DownloadResu
 		}
 		announceDownload(label, offset, total)
 
+		// A pre-planted symlink at the predictable tmp path must not be
+		// followed: remove it so the write lands inside dir, not a victim file.
+		if linfo, lerr := os.Lstat(tmpPath); lerr == nil && linfo.Mode()&os.ModeSymlink != 0 {
+			_ = os.Remove(tmpPath)
+			if appendMode {
+				resp.Body.Close()
+				if attempt == 0 {
+					continue
+				}
+				return nil, fmt.Errorf("failed to create temporary file %q: symlink rejected", tmpPath)
+			}
+		}
 		flags := os.O_CREATE | os.O_WRONLY
 		if appendMode {
 			flags |= os.O_APPEND
@@ -219,7 +253,7 @@ func DownloadAndVerify(ctx context.Context, opts DownloadOptions) (*DownloadResu
 			bar.Abort()
 			// Keep the partial file so the next run resumes instead of
 			// restarting.
-			return nil, fmt.Errorf("download stream error for %s: %w", opts.URL, copyErr)
+			return nil, fmt.Errorf("download stream error for %s: %w", redacted, copyErr)
 		}
 		if closeErr != nil {
 			bar.Abort()

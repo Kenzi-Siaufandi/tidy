@@ -115,6 +115,9 @@ func extractZip(zipPath, destDir string) (int, error) {
 			rc.Close()
 			return count, fmt.Errorf("failed to create output file %q: %w", targetPath, err)
 		}
+		// Duplicate entries overwrite: OpenFile mode applies only at
+		// creation, so enforce it explicitly (see tar path).
+		_ = outFile.Chmod(mode)
 
 		written, copyErr := io.Copy(outFile, io.LimitReader(rc, MaxArchiveTotalBytes-totalBytes+1))
 		closeErr := outFile.Close()
@@ -201,9 +204,6 @@ func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 			// Directory entries count toward entries (inode exhaustion)
 			// but not toward the returned file count.
 		case tar.TypeReg:
-			if entries >= MaxArchiveFiles {
-				return count, fmt.Errorf("archive exceeds file limit of %d", MaxArchiveFiles)
-			}
 			if header.Size > MaxArchiveTotalBytes {
 				return count, fmt.Errorf("archive entry %q exceeds size limit", header.Name)
 			}
@@ -223,6 +223,10 @@ func extractTarReader(tr *tar.Reader, destDir string) (int, error) {
 			if err != nil {
 				return count, fmt.Errorf("failed to create output file %q: %w", targetPath, err)
 			}
+			// OpenFile's mode applies only at creation; an overwrite of a
+			// pre-existing file (e.g. duplicate archive entry) keeps the
+			// old mode. Enforce the sanitized mode explicitly.
+			_ = outFile.Chmod(mode)
 
 			written, copyErr := io.Copy(outFile, io.LimitReader(tr, MaxArchiveTotalBytes-totalBytes+1))
 			closeErr := outFile.Close()

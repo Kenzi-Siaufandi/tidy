@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -51,6 +52,7 @@ var spinnerFrames = []string{"|", "/", "-", "\\"}
 // Bar tracks a single download. Use New; the returned Bar is always safe to
 // use (an inactive Bar simply passes writes through).
 type Bar struct {
+	mu       sync.Mutex
 	out      io.Writer
 	label    string
 	total    int64 // Content-Length, or -1 when unknown
@@ -78,8 +80,8 @@ func New(label string, total int64) *Bar {
 // NewTo creates a Bar writing to out (used by tests with a buffer).
 func NewTo(out io.Writer, label string, total int64) *Bar {
 	label = strings.TrimSpace(label)
-	if len(label) > maxLabelWidth {
-		label = label[:maxLabelWidth-3] + "..."
+	if r := []rune(label); len(r) > maxLabelWidth {
+		label = string(r[:maxLabelWidth-3]) + "..."
 	}
 	return &Bar{
 		out:           out,
@@ -112,6 +114,11 @@ func isTerminal(w io.Writer) bool {
 // ResumeFrom presets already-downloaded bytes (a resumed Range request), so
 // the bar and speed account for the full file. Call right after New.
 func (b *Bar) ResumeFrom(offset int64) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if offset > 0 {
 		b.written = offset
 	}
@@ -121,16 +128,31 @@ func (b *Bar) ResumeFrom(offset int64) {
 // sit inside an io.MultiWriter download stream.
 func (b *Bar) Write(p []byte) (int, error) {
 	n := len(p)
+	if b == nil {
+		return n, nil
+	}
+	b.mu.Lock()
 	if !b.active || b.finished {
+		b.mu.Unlock()
 		return n, nil
 	}
 	b.written += int64(n)
+	shouldRender := false
 	if b.tty {
 		if time.Since(b.last) >= refreshInterval {
-			b.render(false)
+			shouldRender = true
 		}
 	} else if b.pipeDue() {
-		b.render(false)
+		shouldRender = true
+	}
+	b.mu.Unlock()
+	if shouldRender {
+		b.mu.Lock()
+		// Re-check finished under lock before rendering.
+		if !b.finished && b.active {
+			b.render(false)
+		}
+		b.mu.Unlock()
 	}
 	return n, nil
 }
@@ -171,6 +193,11 @@ func (b *Bar) percent() float64 {
 // Finish renders the final 100% state (unless the download was too small to
 // deserve a bar) and terminates the line.
 func (b *Bar) Finish() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if !b.active || b.finished {
 		return
 	}
@@ -192,6 +219,11 @@ func (b *Bar) Finish() {
 // TTY it terminates the partial line; piped milestones are already complete
 // lines, so it stays silent there.
 func (b *Bar) Abort() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if !b.active || b.finished {
 		return
 	}

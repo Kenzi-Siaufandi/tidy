@@ -49,7 +49,7 @@ if [ -n "${WANT}" ] && [ "${WANT}" != "latest" ]; then
     esac
     PIN_URL="https://github.com/Kenzi-Siaufandi/tidy/releases/download/${TAG}/tidy-${TAG}-linux-${GOARCH}"
     PIN_DEST="${TMPDIR:-/tmp}/tidy-${TAG}-linux-${GOARCH}"
-    if [ -x "${PIN_DEST}" ] && "${PIN_DEST}" --version 2>/dev/null | grep -q "${TAG}"; then
+    if [ -x "${PIN_DEST}" ] && "${PIN_DEST}" --version 2>/dev/null | grep -Fq -- "${TAG}"; then
       echo "tidy ${TAG} (reusing cached ${PIN_DEST})"
     else
       echo "TIDY_VERSION=${WANT}: downloading ${PIN_URL} ..."
@@ -76,9 +76,9 @@ fi
 # 1. Pre-flight via tidy (unless STARTUP already invokes it, for backwards compat
 # with old `tidy && ...` eggs — running it twice is only wasted time otherwise).
 MODIFIED_STARTUP=$(printf '%s' "${STARTUP}" | sed -e 's/{{/${/g' -e 's/}}/}/g')
-TRIMMED="$(echo "${MODIFIED_STARTUP}" | sed -e 's/^[[:space:]]*//')"
+TRIMMED="$(printf '%s' "${MODIFIED_STARTUP}" | sed -e 's/^[[:space:]]*//')"
 case "${TRIMMED}" in
-  tidy\ *|tidy\;*|tidy\&\&*|"$TIDY_BIN"*|TIDY_BIN*|\$TIDY_BIN*|\"\$TIDY_BIN\"*)
+  tidy\ *|tidy\;*|tidy\&\&*|exec\ tidy\ *|exec\ tidy\;*|exec\ tidy\&\&*|"$TIDY_BIN"*|TIDY_BIN*|\$TIDY_BIN*|\"\$TIDY_BIN\"*)
     printf "\033[1m\033[33mcontainer@pterodactyl~ \033[0m%s\n" "tidy (via Startup, skipping auto pre-flight)"
     ;;
   *)
@@ -130,7 +130,7 @@ __tidy_run_segment_now() {
   fi
   __tidy_argv=()
   if __tidy_should_run_next; then
-    env "${cmd[@]}"
+    env -- "${cmd[@]}"
     __tidy_last_rc=$?
   fi
 }
@@ -152,7 +152,7 @@ __tidy_exec_final_segment() {
   if ! __tidy_should_run_next; then
     exit "${__tidy_last_rc}"
   fi
-  exec env "${cmd[@]}"
+  exec env -- "${cmd[@]}"
   echo "[!] failed to exec startup command" >&2
   exit 127
 }

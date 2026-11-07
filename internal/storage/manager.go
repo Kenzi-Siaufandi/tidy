@@ -90,7 +90,14 @@ func resolveDestPath(workDir, configuredPath string) (string, error) {
 		}
 	}
 	if _, lerr := os.Lstat(existing); lerr == nil {
-		if realExisting, err := filepath.EvalSymlinks(existing); err == nil {
+		realExisting, err := filepath.EvalSymlinks(existing)
+		if err != nil {
+			// Fail closed on unresolvable symlinks; plain transient races
+			// keep lexical containment only.
+			if li, sErr := os.Lstat(existing); sErr == nil && li.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("destination path %q cannot be resolved: %w", configuredPath, err)
+			}
+		} else {
 			rem, remErr := filepath.Rel(existing, abs)
 			if remErr != nil {
 				return "", remErr

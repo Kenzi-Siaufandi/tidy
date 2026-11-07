@@ -121,7 +121,7 @@ func SaveState(workDir string, s *State) error {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("failed to write temp state file: %w", err)
 	}
-	if err := tmp.Chmod(0644); err != nil {
+	if err := tmp.Chmod(0600); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("failed to chmod temp state file: %w", err)

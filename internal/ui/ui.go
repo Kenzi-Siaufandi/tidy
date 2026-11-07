@@ -3,49 +3,51 @@ package ui
 import (
 	"os"
 	"strings"
+	"sync/atomic"
 )
 
 const (
-	reset = "\x1b[0m"
-	red   = "\x1b[31m"
-	green = "\x1b[32m"
+	reset  = "\x1b[0m"
+	red    = "\x1b[31m"
+	green  = "\x1b[32m"
 	yellow = "\x1b[33m"
-	cyan  = "\x1b[36m"
-	gray  = "\x1b[90m"
-	bold  = "\x1b[1m"
+	cyan   = "\x1b[36m"
+	gray   = "\x1b[90m"
+	bold   = "\x1b[1m"
 )
 
-var enabled = true
+var enabled atomic.Bool
 
 func init() {
 	// Pterodactyl consoles render ANSI even when piped, so default to
 	// enabled and only opt out on explicit signals.
+	enabled.Store(true)
 	if _, ok := os.LookupEnv("NO_COLOR"); ok {
-		enabled = false
+		enabled.Store(false)
 	}
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("TERM")), "dumb") {
-		enabled = false
+		enabled.Store(false)
 	}
 	if strings.TrimSpace(os.Getenv("CLICOLOR")) == "0" {
-		enabled = false
+		enabled.Store(false)
 	}
 	if force := strings.TrimSpace(os.Getenv("CLICOLOR_FORCE")); force != "" && force != "0" {
-		enabled = true
+		enabled.Store(true)
 	}
 }
 
 // SetEnabled forces color on or off (e.g. --no-color flag, tests).
 func SetEnabled(v bool) {
-	enabled = v
+	enabled.Store(v)
 }
 
 // Enabled reports whether color codes are emitted.
 func Enabled() bool {
-	return enabled
+	return enabled.Load()
 }
 
 func wrap(code, s string) string {
-	if !enabled {
+	if !enabled.Load() {
 		return s
 	}
 	return code + s + reset

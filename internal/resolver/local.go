@@ -60,7 +60,16 @@ func ResolveLocalPath(pCfg config.PluginConfig, workDir string) (string, string,
 		existing = parent
 	}
 	if _, lerr := os.Lstat(existing); lerr == nil {
-		if realExisting, err := filepath.EvalSymlinks(existing); err == nil {
+		realExisting, err := filepath.EvalSymlinks(existing)
+		if err != nil {
+			// Fail closed: an existing path that cannot be resolved (dangling
+			// symlink, loop, permissions) must not skip the containment guard.
+			if li, sErr := os.Lstat(existing); sErr == nil && li.Mode()&os.ModeSymlink != 0 {
+				return "", "", fmt.Errorf("local source 'path' %q cannot be resolved: %w", pCfg.Path, err)
+			}
+			// Not a symlink (e.g. transient stat race): lexical containment
+			// already passed; skip symlink containment.
+		} else {
 			if rrel, rerr := filepath.Rel(realWork, realExisting); rerr != nil || rrel == ".." || strings.HasPrefix(rrel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rrel) {
 				if rrel != "." {
 					return "", "", fmt.Errorf("local source 'path' %q must stay inside the workdir", pCfg.Path)

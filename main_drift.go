@@ -120,16 +120,23 @@ var volatileDateComment = regexp.MustCompile(`^#[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1
 // context lines never count; a binary-change marker always counts.
 // hasRealDiff reports whether a unified diff contains any change beyond
 // volatile date comments. Headers (+++ / --- / @@ / diff --git / index) and
-// context lines never count; a binary-change marker always counts.
+// context lines never count; a binary-change marker always counts. Mode
+// changes (old mode/new mode) count: reset --hard would discard them.
+// Header matches require the trailing space/tab git emits ("--- a/file"),
+// so content lines "++foo"/"---foo" are not mistaken for headers.
 func hasRealDiff(diff string) bool {
 	for _, l := range strings.Split(diff, "\n") {
 		switch {
 		case l == "",
-			strings.HasPrefix(l, "+++"), strings.HasPrefix(l, "---"),
+			strings.HasPrefix(l, "+++ ") || strings.HasPrefix(l, "+++\t"),
+			strings.HasPrefix(l, "--- ") || strings.HasPrefix(l, "---\t"),
 			strings.HasPrefix(l, "@@"), strings.HasPrefix(l, "diff --git"),
 			strings.HasPrefix(l, "index "):
 			continue
 		case strings.HasPrefix(l, "Binary files "):
+			return true
+		case strings.HasPrefix(l, "old mode ") || strings.HasPrefix(l, "new mode ") ||
+			strings.HasPrefix(l, "new file mode ") || strings.HasPrefix(l, "deleted file mode "):
 			return true
 		case strings.HasPrefix(l, "+") || strings.HasPrefix(l, "-"):
 			if volatileDateComment.MatchString(strings.TrimSpace(l[1:])) {
@@ -266,7 +273,9 @@ func maskedTemplatedDiff(ctx context.Context, gitClient *git.Client, workDir, re
 	expected, _, _ := templating.ReplaceString(head)
 	workBytes, err := os.ReadFile(filepath.Join(workDir, filepath.FromSlash(relPath)))
 	if err != nil {
-		return "", false
+		// Fail closed: a deleted/unreadable templated file must never
+		// fall through to the raw diff, which may contain secrets.
+		return "(diff omitted: template safety could not be verified)\n", false
 	}
 	if contentsEqualIgnoringVolatile(expected, string(workBytes)) {
 		return "", true
@@ -363,9 +372,8 @@ func contentsEqualIgnoringVolatile(a, b string) bool {
 		var kept []string
 		for _, l := range strings.Split(s, "\n") {
 			t := strings.TrimRight(l, "\r")
-			if volatileDateComment.MatchString(strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(t, "+"), "-"))) {
-				continue
-			}
+			// Only bare date-comment lines are volatile. Diff-style
+			// "+#Sun ..." lines are content, not churn.
 			if volatileDateComment.MatchString(strings.TrimSpace(t)) {
 				continue
 			}
@@ -392,7 +400,7 @@ func configRelPath(workDir, configFlag string) string {
 		}
 		rel = r
 	}
-	return filepath.ToSlash(rel)
+	return filepath.ToSlash(filepath.Clean(rel))
 }
 
 // formatDriftReport renders the panel-viewable drift report body.

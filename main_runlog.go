@@ -66,7 +66,7 @@ func startRunLog(workDir string, now time.Time) {
 		return
 	}
 	name := uniqueRunLogName(workDir, now)
-	f, err := os.OpenFile(filepath.Join(workDir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	f, err := os.OpenFile(filepath.Join(workDir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return
 	}
@@ -250,4 +250,3 @@ func setupWorkdir(args []string) string {
 	}
 	return dir
 }
-

@@ -65,16 +65,28 @@ func IsSupportedConfigFile(path string) bool {
 	}
 }
 
-// ProcessFile applies template replacements to a single file.
+// ProcessFile applies template replacements to a single file. Symlinked
+// configs are rendered through to their resolved target (inside rootDir's
+// containment checks upstream) so renaming the symlink itself does not
+// silently break the link.
 func ProcessFile(path string) (int, []string, error) {
-	info, err := os.Stat(path)
+	// Resolve symlink once: Stat/ReadFile follow it, but Rename would
+	// replace the link itself and leave the target untemplated.
+	effectivePath := path
+	if linfo, lerr := os.Lstat(path); lerr == nil && linfo.Mode()&os.ModeSymlink != 0 {
+		if resolved, rerr := filepath.EvalSymlinks(path); rerr == nil {
+			effectivePath = resolved
+		}
+	}
+	info, err := os.Stat(effectivePath)
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to stat file %q: %w", path, err)
 	}
 	if info.Size() > MaxTemplateFileBytes {
+		fmt.Printf("%s\n", ui.Yellow(fmt.Sprintf(" [!] Templates warning: skipping %s: file exceeds %d bytes", path, MaxTemplateFileBytes)))
 		return 0, nil, nil
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(effectivePath)
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to read file %q: %w", path, err)
 	}
@@ -88,7 +100,7 @@ func ProcessFile(path string) (int, []string, error) {
 		if mode == 0 {
 			mode = 0644
 		}
-		tmp, err := os.CreateTemp(filepath.Dir(path), ".tidy-tpl-*")
+		tmp, err := os.CreateTemp(filepath.Dir(effectivePath), ".tidy-tpl-*")
 		if err != nil {
 			return 0, nil, fmt.Errorf("failed to create temp file for %q: %w", path, err)
 		}
@@ -103,11 +115,16 @@ func ProcessFile(path string) (int, []string, error) {
 			_ = os.Remove(tmpName)
 			return 0, nil, fmt.Errorf("failed to chmod templated file %q: %w", path, err)
 		}
+		if err := tmp.Sync(); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+			return 0, nil, fmt.Errorf("failed to sync templated file %q: %w", path, err)
+		}
 		if err := tmp.Close(); err != nil {
 			_ = os.Remove(tmpName)
 			return 0, nil, fmt.Errorf("failed to close templated file %q: %w", path, err)
 		}
-		if err := os.Rename(tmpName, path); err != nil {
+		if err := os.Rename(tmpName, effectivePath); err != nil {
 			_ = os.Remove(tmpName)
 			return 0, nil, fmt.Errorf("failed to replace templated file %q: %w", path, err)
 		}
@@ -239,9 +256,9 @@ func processOneFile(rootDir, absPath string, result *ReplaceResult) error {
 			return nil
 		}
 	}
-	// Never touch .git/.tidy internals even if a custom glob matches them.
+	// Never touch .git/.tidy/cache internals even if a custom glob matches them.
 	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
-		if part == ".git" || part == ".tidy" {
+		if part == ".git" || part == ".tidy" || part == "cache" {
 			return nil
 		}
 	}

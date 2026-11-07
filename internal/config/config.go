@@ -178,6 +178,11 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Server.Build) == "" {
 		c.Server.Build = "latest"
 	}
+	// Normalize whitespace so downstream API calls and state comparisons
+	// see clean values (" paper " must not 404 via PathEscape).
+	c.Server.Project = strings.TrimSpace(c.Server.Project)
+	c.Server.Version = strings.TrimSpace(c.Server.Version)
+	c.Server.Build = strings.TrimSpace(c.Server.Build)
 
 	// Validate Plugins
 	for name, p := range c.Plugins {
@@ -216,10 +221,12 @@ func (c *Config) Validate() error {
 				if err := validateSHA256Hex(sha); err != nil {
 					return fmt.Errorf("plugin %q: invalid 'sha256': %w", name, err)
 				}
+				p.SHA256 = sha
 				// Note: combining 'sha256' with version="latest" freezes the
 				// jar, so a future upstream release fails verification by
 				// design. Users tracking 'latest' should normally omit it.
 			}
+			p.ProjectID = strings.TrimSpace(p.ProjectID)
 			c.Plugins[name] = p
 		case "url":
 			if strings.TrimSpace(p.URL) == "" {
@@ -287,6 +294,7 @@ func (c *Config) Validate() error {
 			if err := validateSHA256Hex(sha); err != nil {
 				return fmt.Errorf("plugin %q: invalid 'sha256': %w", name, err)
 			}
+			p.SHA256 = sha
 			c.Plugins[name] = p
 		case "local":
 			if strings.TrimSpace(p.Path) == "" {
@@ -312,6 +320,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("plugin %q: invalid 'sha256': %w", name, err)
 			}
 			p.Path = strings.TrimSpace(p.Path)
+			p.SHA256 = sha
 			c.Plugins[name] = p
 		default:
 			return fmt.Errorf("plugin %q: unsupported source %q (supported: 'modrinth', 'url', 'github', 'local')", name, p.Source)
@@ -352,6 +361,11 @@ func (c *Config) Validate() error {
 			if err := validateSHA256Hex(sha); err != nil {
 				return fmt.Errorf("%s %q: invalid 'sha256': %w", sectionName, name, err)
 			}
+			f.Path = rawPath
+			f.URL = strings.TrimSpace(f.URL)
+			f.SHA256 = sha
+			f.Source = strings.ToLower(strings.TrimSpace(f.Source))
+			items[name] = f
 		}
 		return nil
 	}

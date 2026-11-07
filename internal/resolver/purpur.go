@@ -166,8 +166,12 @@ func (c *PurpurClient) ResolveAndDownload(ctx context.Context, serverCfg config.
 		url.PathEscape(strings.TrimSpace(buildResp.Build)))
 
 	downloadClient := c.HTTPClient
-	if downloadClient == nil || downloadClient.Timeout < 5*time.Minute {
+	if downloadClient == nil {
 		downloadClient = &http.Client{Timeout: 5 * time.Minute}
+	} else if downloadClient.Timeout < 5*time.Minute {
+		cp := *downloadClient
+		cp.Timeout = 5 * time.Minute
+		downloadClient = &cp
 	}
 
 	if _, err := DownloadAndVerify(ctx, DownloadOptions{

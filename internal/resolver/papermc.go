@@ -83,10 +83,15 @@ func (c *PaperClient) ResolveAndDownload(ctx context.Context, serverCfg config.S
 	targetPath := filepath.Join(workDir, filename)
 
 	// Use a long-timeout client for the (large) jar download; the API client
-	// default of 30s is too short for slow networks.
+	// default of 30s is too short for slow networks. Preserve caller
+	// Transport/Jar/CheckRedirect by copying, never discarding them.
 	downloadClient := c.HTTPClient
-	if downloadClient == nil || downloadClient.Timeout < 5*time.Minute {
+	if downloadClient == nil {
 		downloadClient = &http.Client{Timeout: 5 * time.Minute}
+	} else if downloadClient.Timeout < 5*time.Minute {
+		cp := *downloadClient
+		cp.Timeout = 5 * time.Minute
+		downloadClient = &cp
 	}
 
 	res, err := DownloadAndVerify(ctx, DownloadOptions{
@@ -149,23 +154,17 @@ func (c *PaperClient) FetchBuild(ctx context.Context, serverCfg config.ServerCon
 		return nil, nil, fmt.Errorf("failed to parse PaperMC Fill API response: %w", err)
 	}
 
-	// Select server download artifact deterministically.
+	// Select server download artifact. Fail closed: only server:default
+	// is a bootable server jar. Falling back to an arbitrary artifact
+	// (e.g. a client or tool jar) verifies against its own hash and
+	// installs a wrong jar silently.
 	dl, ok := buildResp.Downloads["server:default"]
 	if !ok {
-		// Deterministic fallback: sorted keys instead of random map iteration.
-		keys := make([]string, 0, len(buildResp.Downloads))
-		for k := range buildResp.Downloads {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			dl = buildResp.Downloads[k]
-			ok = true
-			break
-		}
+		return nil, nil, fmt.Errorf("no server:default download in PaperMC Fill API response for %s %s build %d (available: %v); refusing to install a non-server artifact",
+			serverCfg.Project, serverCfg.Version, buildResp.ID, sortedDownloadKeys(buildResp.Downloads))
 	}
 
-	if !ok || strings.TrimSpace(dl.URL) == "" {
+	if strings.TrimSpace(dl.URL) == "" {
 		return nil, nil, fmt.Errorf("no server download URL found in PaperMC Fill API response for %s %s build %d",
 			serverCfg.Project, serverCfg.Version, buildResp.ID)
 	}
@@ -177,4 +176,13 @@ func (c *PaperClient) FetchBuild(ctx context.Context, serverCfg config.ServerCon
 
 	dlCopy := dl
 	return &buildResp, &dlCopy, nil
+}
+
+func sortedDownloadKeys(m map[string]FillDownload) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

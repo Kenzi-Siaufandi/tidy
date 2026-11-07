@@ -215,8 +215,16 @@ func isListed(status string) bool {
 
 // selectPrimaryFile picks the primary file, falling back to the first file.
 func selectPrimaryFile(ver *ModrinthVersion) (*ModrinthFile, error) {
-	if len(ver.Files) == 0 {
-		return nil, fmt.Errorf("no files associated with version %q for project %q on Modrinth", ver.VersionNumber, ver.ProjectID)
+	if ver == nil || len(ver.Files) == 0 {
+		verID := ""
+		if ver != nil {
+			verID = ver.VersionNumber
+		}
+		projID := ""
+		if ver != nil {
+			projID = ver.ProjectID
+		}
+		return nil, fmt.Errorf("no files associated with version %q for project %q on Modrinth", verID, projID)
 	}
 	selected := &ver.Files[0]
 	for i := range ver.Files {
@@ -253,7 +261,11 @@ const latestMaxPages = 5
 // resolveLatest returns the newest version matching the game_version/loader
 // filters and channel policy. The API returns newest first; pagination
 // continues until a short page or a match so compatible releases beyond the
-// first window are still found.
+// first window are still found. The server-side loaders filter is exact, so
+// bukkit-only builds are missed (pins already handle this via
+// loaderCompatible): when the filtered scan finds nothing, fall back to a
+// game-version-filtered, loader-unfiltered scan with client-side
+// loaderCompatible checks, mirroring resolvePinned.
 func (c *ModrinthClient) resolveLatest(ctx context.Context, pCfg config.PluginConfig) (*ModrinthVersion, *ModrinthFile, error) {
 	gameVersion := pCfg.NormalizedGameVersion()
 	loader := pCfg.NormalizedLoader()
@@ -284,12 +296,57 @@ func (c *ModrinthClient) resolveLatest(ctx context.Context, pCfg config.PluginCo
 		}
 	}
 
+	// Bukkit/spigot fallback: server-side loader filtering is exact, so a
+	// bukkit-only project resolves when pinned but not on "latest".
+	if strings.TrimSpace(loader) != "" && !isExactLoaderFamily(loader) {
+		// Non-family loaders (e.g. fabric/neoforge) keep exact semantics:
+		// skip the fallback to avoid false matches.
+	} else {
+		for page := 0; page < latestMaxPages; page++ {
+			versions, err := c.fetchVersions(ctx, pCfg.ProjectID, gameVersion, "", latestFetchLimit, page*latestFetchLimit)
+			if err != nil {
+				return nil, nil, err
+			}
+			for i := range versions {
+				v := &versions[i]
+				if !loaderCompatible(v.Loaders, loader) {
+					continue
+				}
+				if !supportsGameVersion(v, gameVersion) {
+					continue
+				}
+				if !isListed(v.Status) || !allowVersionType(v.VersionType, channel) {
+					continue
+				}
+				file, err := selectPrimaryFile(v)
+				if err != nil {
+					continue
+				}
+				return v, file, nil
+			}
+			if len(versions) < latestFetchLimit {
+				break
+			}
+		}
+	}
+
 	if strings.TrimSpace(gameVersion) != "" {
 		return nil, nil, fmt.Errorf("no %s version of Modrinth project %q supports game version %q (loader %q, channel %q)",
 			channel, pCfg.ProjectID, gameVersion, loader, channel)
 	}
 	return nil, nil, fmt.Errorf("no %s versions found on Modrinth for project %q (loader %q, channel %q)",
 		channel, pCfg.ProjectID, loader, channel)
+}
+
+// isExactLoaderFamily reports whether the requested loader is in the
+// interchangeable bukkit/spigot/paper family (see loaderCompatible).
+func isExactLoaderFamily(loader string) bool {
+	switch strings.ToLower(strings.TrimSpace(loader)) {
+	case "bukkit", "spigot", "paper":
+		return true
+	default:
+		return false
+	}
 }
 
 // loaderCompatible reports whether a Modrinth version's loader list satisfies
@@ -443,6 +500,9 @@ func (c *ModrinthClient) Resolve(ctx context.Context, pCfg config.PluginConfig) 
 // Download fetches the already-resolved file, verifies its hash, enforces an
 // optional sha256 pin, and records resolved version metadata in the result.
 func (c *ModrinthClient) Download(ctx context.Context, pluginName string, pCfg config.PluginConfig, workDir string, ver *ModrinthVersion, file *ModrinthFile) (*PluginDownloadResult, error) {
+	if ver == nil || file == nil {
+		return nil, fmt.Errorf("plugin %q: modrinth version/file is not resolved", pluginName)
+	}
 	// Determine hash algorithm, strongest first.
 	var hashAlgo, expectedHash string
 	if h, ok := file.Hashes["sha512"]; ok && strings.TrimSpace(h) != "" {
@@ -471,10 +531,15 @@ func (c *ModrinthClient) Download(ctx context.Context, pluginName string, pCfg c
 	}
 
 	// Use a long-timeout client for the (large) jar download; the API client
-	// default of 30s is too short for slow networks.
+	// default of 30s is too short for slow networks. Preserve caller
+	// Transport/Jar/CheckRedirect by copying, never discarding them.
 	downloadClient := c.HTTPClient
-	if downloadClient == nil || downloadClient.Timeout < 5*time.Minute {
+	if downloadClient == nil {
 		downloadClient = &http.Client{Timeout: 5 * time.Minute}
+	} else if downloadClient.Timeout < 5*time.Minute {
+		cp := *downloadClient
+		cp.Timeout = 5 * time.Minute
+		downloadClient = &cp
 	}
 
 	res, err := DownloadAndVerify(ctx, DownloadOptions{

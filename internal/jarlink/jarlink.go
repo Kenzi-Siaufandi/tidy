@@ -38,7 +38,7 @@ func AliasFromEnv(getenv func(string) string) string {
 func Sync(workDir, target, alias string) (string, error) {
 	target = strings.TrimSpace(target)
 	alias = strings.TrimSpace(alias)
-	if target == "" || alias == "" || alias == target {
+	if target == "" || alias == "" || strings.EqualFold(alias, target) {
 		return "", nil
 	}
 
@@ -46,18 +46,30 @@ func Sync(workDir, target, alias string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid jar alias %q: %w", alias, err)
 	}
+	// Target must be a bare filename too: a tampered state value like
+	// "../../x" must not make the link point outside workDir.
+	safeTarget, err := resolver.SafeFilename(target, "")
+	if err != nil {
+		return "", fmt.Errorf("invalid jar target %q: %w", target, err)
+	}
+	if strings.EqualFold(safeAlias, safeTarget) {
+		return "", nil
+	}
 	aliasPath := filepath.Join(workDir, safeAlias)
-	targetPath := filepath.Join(workDir, strings.TrimSpace(target))
+	targetPath := filepath.Join(workDir, safeTarget)
+	if _, err := os.Stat(targetPath); err != nil {
+		return "", fmt.Errorf("jar target %q not found: %w", safeTarget, err)
+	}
 
 	if st, err := os.Lstat(aliasPath); err == nil {
 		if st.IsDir() && st.Mode()&os.ModeSymlink == 0 {
 			return "", fmt.Errorf("jar alias %q is a directory, leaving it alone", safeAlias)
 		}
-		// Remove stale symlink or regular file before relinking.
-		_ = os.Remove(aliasPath)
 	}
 
-	// Atomic symlink swap: link into temp name then rename.
+	// Atomic symlink swap: link into temp name then rename. Rename alone
+	// replaces the destination atomically on Linux; no pre-Remove (a crash
+	// between Remove and Rename would leave the alias missing).
 	tmp, err := os.CreateTemp(workDir, ".tidy-jarlink-*")
 	if err != nil {
 		return "", fmt.Errorf("failed to stage jar link: %w", err)
@@ -66,11 +78,11 @@ func Sync(workDir, target, alias string) (string, error) {
 	_ = tmp.Close()
 	_ = os.Remove(tmpName)
 
-	if err := os.Symlink(strings.TrimSpace(target), tmpName); err != nil {
+	if err := os.Symlink(safeTarget, tmpName); err != nil {
 		// Privilege-restricted filesystems (e.g. Windows): fall back to copy.
 		if copyErr := copyFile(targetPath, tmpName); copyErr != nil {
 			_ = os.Remove(tmpName)
-			return "", fmt.Errorf("failed to link %s -> %s: %w", safeAlias, target, err)
+			return "", fmt.Errorf("failed to link %s -> %s: %w", safeAlias, safeTarget, err)
 		}
 	}
 	if err := os.Rename(tmpName, aliasPath); err != nil {
@@ -94,7 +106,9 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }

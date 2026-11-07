@@ -42,10 +42,14 @@ func ResolveAndDownloadURL(ctx context.Context, pluginName string, pCfg config.P
 	targetPath := filepath.Join(workDir, "plugins", filename)
 
 	// Use a long-timeout client for the (large) jar download; a short API
-	// timeout would kill slow transfers.
+	// timeout would kill slow transfers. Copy to preserve caller settings.
 	downloadClient := client
-	if downloadClient == nil || downloadClient.Timeout < 5*time.Minute {
+	if downloadClient == nil {
 		downloadClient = &http.Client{Timeout: 5 * time.Minute}
+	} else if downloadClient.Timeout < 5*time.Minute {
+		cp := *downloadClient
+		cp.Timeout = 5 * time.Minute
+		downloadClient = &cp
 	}
 
 	res, err := DownloadAndVerify(ctx, DownloadOptions{
