@@ -1,4 +1,4 @@
 package version
 
 // Version is the single source of truth for Tidy releases.
-const Version = "3.0.0"
+const Version = "3.0.1"
